@@ -1,0 +1,5 @@
+/.worktrees/
+/.subactor/receipts/
+/.subactor/leases/
+__pycache__/
+*.pyc
