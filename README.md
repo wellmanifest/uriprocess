@@ -8,6 +8,17 @@ przez URI. HOME `wellmanifest`, SHAPE `domain_pack`.
 - [Polityka maszynowa](policy.json)
 - [Schematy dwóch profili i pochodzenia](schemas/package.schema.json)
 - [Referencyjna kontrola zgodności](operations/conformance.py)
+- [Standard komplementarny wykonawczy: wellmanifest/taskand](https://github.com/wellmanifest/taskand)
+
+---
+
+## 🔗 Komplementarność ze standardem wellmanifest/taskand
+
+Standard `wellmanifest/uriprocess` definiuje **fazę wytwórczą (Manufacturing & Packaging)** w architekturze procesów URI:
+- Odpowiada za deterministyczne pakowanie kodu z zewnętrznych repozytoriów Git, niezmienność proweniencji (`provenance.json`) i sumy kontrolne plików (`bundle.json`).
+- Wyprodukowane i zatwierdzone pakiety `uriprocess` stanowią wejście do standardu wykonawczego [wellmanifest/taskand](https://github.com/wellmanifest/taskand), który zarządza kapsułą (`capsule.yaml`), uprawnieniami (`grants.yaml`), kwalifikacją w Cyfrowym Bliźniaku (bramki A/B) oraz orkiestracją wykonania.
+
+---
 
 Profile: POA/Node oraz natywny konektor Pythona. Kontrola jest tylko do odczytu;
 nie wykonuje procesów, testów pakietu ani operacji Guard.

@@ -1,0 +1,142 @@
+{
+  "$schema": "https://wellmanifest.dev/schemas/dsl-manifest/v1",
+  "schema": "wellmanifest.dsl/manifest/v1",
+  "id": "wellmanifest.uriprocess",
+  "name": "Wellmanifest URIprocess Packaging & Provenance Standard",
+  "version": "0.1.0",
+  "status": "stable",
+  "purpose": "Standard wytwarzania, certyfikacji pochodzenia (provenance) oraz hermetycznego pakowania procesow identyfikowanych przez URI.",
+  "domain": "process-packaging-provenance",
+  "owners": [
+    {
+      "kind": "organization",
+      "id": "wellmanifest",
+      "responsibilities": [
+        "semantics",
+        "validation",
+        "compatibility"
+      ]
+    }
+  ],
+  "source": {
+    "repository": "https://github.com/wellmanifest/uriprocess",
+    "path": "policy.json",
+    "canonical": "json-ast",
+    "mediaType": "application/json",
+    "selectors": [
+      "package_version",
+      "provenance",
+      "rules"
+    ]
+  },
+  "ownedPaths": [
+    "dsl-manifest.json",
+    "policy.json",
+    "schemas/*",
+    "docs/*",
+    "operations/*",
+    "README.md",
+    "AGENTS.md"
+  ],
+  "artifacts": [
+    {
+      "path": "policy.json",
+      "role": "normative-source",
+      "digest": "sha256:45dd68d76bf5be9f0071d9ef8739422ddba25449d1241e3383a6c814e6cf5a74"
+    },
+    {
+      "path": "schemas/package.schema.json",
+      "role": "schema",
+      "digest": "sha256:39609530f76079b8cf2c22939debefafba6afd36c87480c5c9ae065fbf9fd6aa"
+    },
+    {
+      "path": "README.md",
+      "role": "documentation",
+      "digest": "sha256:9f0d56677f2c1121ea9f4e100d7c6697ca8b5cc28c521d6d349cab7ad40359b9"
+    }
+  ],
+  "namespaces": [
+    {
+      "prefix": "urp",
+      "uri": "https://wellmanifest.dev/schemas/uriprocess/v1"
+    }
+  ],
+  "projections": [],
+  "lifecycle": {
+    "compatibility": "semver",
+    "stability": "stable",
+    "breaking": "major",
+    "additive": "minor",
+    "fix": "patch"
+  },
+  "semantics": {
+    "effectModel": "propose-only",
+    "unknownPolicy": "reject",
+    "authoritySchema": null
+  },
+  "llm": {
+    "mode": "none",
+    "requestSchemas": [],
+    "responseSchemas": [],
+    "naturalLanguage": "forbidden",
+    "sourceSchema": null,
+    "decisionProtocol": "none",
+    "modelAuthority": "none",
+    "strict": true
+  },
+  "documentation": {
+    "vocabularyKind": "documents",
+    "commandRoot": "docs",
+    "errorRoot": "docs/ERROR",
+    "criticalRoot": "docs/CRITICAL",
+    "commands": [],
+    "errorCodes": [],
+    "criticalCodes": []
+  },
+  "findingPolicy": {
+    "schema": "wellmanifest.dsl/findings/v1",
+    "requiredProducers": [
+      "wellmanifest.uriprocess.conformance"
+    ],
+    "securityProducers": [
+      "wellmanifest.uriprocess.conformance"
+    ],
+    "blockingSeverities": [
+      "critical"
+    ],
+    "requireEvaluable": true,
+    "blockUnresolvedSecurity": true
+  },
+  "publicationPolicy": {
+    "declaredTier": "review",
+    "deterministic": true,
+    "independentReview": true,
+    "externalAuthority": false,
+    "runtimeIsolation": false
+  },
+  "conformance": {
+    "levels": [
+      "manifest",
+      "contract"
+    ],
+    "commands": [
+      "make test",
+      "python3 operations/conformance.py"
+    ],
+    "validExamples": [],
+    "invalidExamples": []
+  },
+  "mappings": [
+    {
+      "standard": "wellmanifest.taskand",
+      "version": "1.1.0",
+      "relation": "compatible-with",
+      "uri": "https://github.com/wellmanifest/taskand"
+    },
+    {
+      "standard": "wellmanifest.dsl",
+      "version": "0.1.0",
+      "relation": "compatible-with"
+    }
+  ]
+}
