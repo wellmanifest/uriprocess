@@ -88,6 +88,14 @@ def document(root, name):
         raise ConformanceError("URP-DATA-001") from exc
 
 
+_IGNORED_DIRS = {
+    ".git", "target", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".venv", "venv", ".worktrees", ".subactor", ".governance", ".planfile",
+    "build", "dist", ".benchmarks", ".cursor", ".github", ".githooks",
+}
+_IGNORED_FILES = {".willrust-inventory.cache", "Cargo.lock"}
+
+
 def inventory(root):
     files, pending, count = set(), [Path(root)], 0
     while pending:
@@ -95,6 +103,8 @@ def inventory(root):
         try:
             with os.scandir(folder) as entries:
                 for entry in entries:
+                    if entry.name in _IGNORED_DIRS or entry.name.endswith(".egg-info") or entry.name in _IGNORED_FILES:
+                        continue
                     count += 1
                     require(count <= MAX_ENTRIES, "URP-PATH-001")
                     observed = entry.stat(follow_symlinks=False)
@@ -126,6 +136,63 @@ def validate_schema(schema, definition, value):
     require(next(validator.iter_errors(value), None) is None, "URP-SCHEMA-001")
 
 
+def _validate_poa_node(root, manifest, copied):
+    require(manifest["contract"] in copied and manifest["entry"] in copied, "URP-INTEGRITY-001")
+    require(any(name.startswith("tests/") and name.endswith(".test.mjs") for name in copied), "URP-TESTS-001")
+    contract = document(root, manifest["contract"])
+    require(isinstance(contract, dict) and contract.get("schema") == "poa.process/v1"
+            and contract.get("process_ref") == manifest["process_ref"], "URP-IDENTITY-001")
+    distribution = document(root, "package.json")
+    require(isinstance(distribution, dict) and distribution.get("type") == "module"
+            and distribution.get("exports") in ("./" + manifest["entry"],
+                                                  {".": "./" + manifest["entry"]}), "URP-IDENTITY-001")
+    docker_lines = read_file(root, "Dockerfile")[0].splitlines()
+    require(docker_lines and docker_lines[0] == ("FROM " + manifest["base_image"]).encode(), "URP-IDENTITY-001")
+    require(read_file(root, "bin.mjs")[1] == 0o755, "URP-INTEGRITY-001")
+    return [manifest["process_ref"]]
+
+
+def _validate_python_native(root, manifest, copied):
+    require(manifest["native_manifest"] in copied and "pyproject.toml" in copied, "URP-INTEGRITY-001")
+    require(any(name.startswith("tests/test_") and name.endswith(".py") for name in copied), "URP-TESTS-001")
+    native = document(root, manifest["native_manifest"])
+    try:
+        project = tomllib.loads(read_file(root, "pyproject.toml")[0].decode())["project"]
+        require(isinstance(native, dict) and native.get("routes") == manifest["public_uris"]
+                and project["name"] == manifest["native_distribution"]
+                and project["version"] == manifest["native_version"]
+                and project["entry-points"]["urirun.bindings"] == manifest["entry_points"]
+                and project.get("dependencies", []) == manifest["dependencies"], "URP-IDENTITY-001")
+    except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+        raise ConformanceError("URP-IDENTITY-001") from exc
+    return manifest["public_uris"]
+
+
+def _validate_rust_uri(root, manifest, copied):
+    require(manifest["cargo_manifest"] in copied and "src/lib.rs" in copied, "URP-INTEGRITY-001")
+    require(any((name.startswith("tests/") and (name.endswith(".rs") or name.endswith(".py"))) for name in copied), "URP-TESTS-001")
+    try:
+        cargo = tomllib.loads(read_file(root, manifest["cargo_manifest"])[0].decode())
+        package = cargo["package"]
+        require(package["name"] == manifest["crate_name"]
+                and package["version"] == manifest["crate_version"], "URP-IDENTITY-001")
+        if "cdylib-c-abi" in manifest["transports"]:
+            crate_types = cargo.get("lib", {}).get("crate-type", [])
+            require("cdylib" in crate_types, "URP-IDENTITY-001")
+        lib_bytes = read_file(root, "src/lib.rs")[0]
+        require(manifest["ffi_symbol"].encode() in lib_bytes, "URP-IDENTITY-001")
+    except (ValueError, KeyError, TypeError, UnicodeError) as exc:
+        raise ConformanceError("URP-IDENTITY-001") from exc
+    return manifest["public_uris"]
+
+
+_PROFILE_VALIDATORS = {
+    "poa-node-v1": _validate_poa_node,
+    "python-native-v1": _validate_python_native,
+    "rust-uri-v1": _validate_rust_uri,
+}
+
+
 def check_package(root):
     root = Path(os.path.abspath(root))
     policy = document(STANDARD_ROOT, "policy.json")
@@ -149,41 +216,16 @@ def check_package(root):
         copied.add(record["destination"])
         data, mode = read_file(root, record["destination"])
         require(hashlib.sha256(data).hexdigest() == record["sha256"], "URP-INTEGRITY-001")
-        require(profile != "python-native-v1" or "mode" in record, "URP-SCHEMA-001")
+        require(profile == "poa-node-v1" or "mode" in record, "URP-SCHEMA-001")
         require(mode == record.get("mode", 0o644), "URP-INTEGRITY-001")
     generated = set(policy["profiles"][profile]["generated_files"])
     require(not generated.intersection(copied), "URP-INTEGRITY-001")
     actual_files = inventory(root)
     require(actual_files == copied | generated, "URP-INTEGRITY-001")
 
-    if profile == "poa-node-v1":
-        require(manifest["contract"] in copied and manifest["entry"] in copied, "URP-INTEGRITY-001")
-        require(any(name.startswith("tests/") and name.endswith(".test.mjs") for name in copied), "URP-TESTS-001")
-        contract = document(root, manifest["contract"])
-        require(isinstance(contract, dict) and contract.get("schema") == "poa.process/v1"
-                and contract.get("process_ref") == manifest["process_ref"], "URP-IDENTITY-001")
-        distribution = document(root, "package.json")
-        require(isinstance(distribution, dict) and distribution.get("type") == "module"
-                and distribution.get("exports") in ("./" + manifest["entry"],
-                                                      {".": "./" + manifest["entry"]}), "URP-IDENTITY-001")
-        docker_lines = read_file(root, "Dockerfile")[0].splitlines()
-        require(docker_lines and docker_lines[0] == ("FROM " + manifest["base_image"]).encode(), "URP-IDENTITY-001")
-        require(read_file(root, "bin.mjs")[1] == 0o755, "URP-INTEGRITY-001")
-        uris = [manifest["process_ref"]]
-    else:
-        require(manifest["native_manifest"] in copied and "pyproject.toml" in copied, "URP-INTEGRITY-001")
-        require(any(name.startswith("tests/test_") and name.endswith(".py") for name in copied), "URP-TESTS-001")
-        native = document(root, manifest["native_manifest"])
-        try:
-            project = tomllib.loads(read_file(root, "pyproject.toml")[0].decode())["project"]
-            require(isinstance(native, dict) and native.get("routes") == manifest["public_uris"]
-                    and project["name"] == manifest["native_distribution"]
-                    and project["version"] == manifest["native_version"]
-                    and project["entry-points"]["urirun.bindings"] == manifest["entry_points"]
-                    and project.get("dependencies", []) == manifest["dependencies"], "URP-IDENTITY-001")
-        except (ValueError, KeyError, TypeError, UnicodeError) as exc:
-            raise ConformanceError("URP-IDENTITY-001") from exc
-        uris = manifest["public_uris"]
+    validator_fn = _PROFILE_VALIDATORS.get(profile)
+    require(validator_fn is not None, "URP-SCHEMA-001")
+    uris = validator_fn(root, manifest, copied)
     for uri in uris:
         validate_uri(uri)
     return {"schema": "wellmanifest.uriprocess/conformance/v1", "status": "passed",

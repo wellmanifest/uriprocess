@@ -1,7 +1,7 @@
 {
   "schema": "wellmanifest.uriprocess/policy/v1",
   "standard": "wellmanifest/uriprocess",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "home": "wellmanifest",
   "shape": "domain_pack",
   "profiles": {
@@ -19,6 +19,13 @@
     },
     "python-native-v1": {
       "manifest_schema": "uriprocess.native-package/v1",
+      "generated_files": [
+        "uriprocess.json",
+        "provenance.json"
+      ]
+    },
+    "rust-uri-v1": {
+      "manifest_schema": "uriprocess.rust-package/v1",
       "generated_files": [
         "uriprocess.json",
         "provenance.json"
@@ -65,6 +72,10 @@
     {
       "id": "URP-010",
       "requirement": "Add new profiles with schemas, representative sources and positive and negative conformance cases."
+    },
+    {
+      "id": "URP-011",
+      "requirement": "Rust URI-process packages (rust-uri-v1) MUST declare Cargo crate identity, dual-transport bindings (cdylib FFI and/or json-stdin-stdout binary), and a prioritized Python fallback chain (floor -> standard)."
     }
   ],
   "errors": {

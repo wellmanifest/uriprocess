@@ -196,6 +196,65 @@ class ConformanceTests(unittest.TestCase):
             self.write("provenance.json", provenance)
             self.rejected("URP-IDENTITY-001")
 
+    def rust_fixture(self):
+        files = {
+            "Cargo.toml": b'[package]\nname="uri-ast-scan-rs"\nversion="0.1.0"\nedition="2021"\n[lib]\ncrate-type=["cdylib", "rlib"]\n',
+            "src/lib.rs": b'#[no_mangle]\npub extern "C" fn uri_ast_scan_execute_json() {}\n',
+            "tests/test_rust_uri.py": b"# preserved test fixture\n",
+        }
+        manifest = {
+            "schema": "uriprocess.rust-package/v1",
+            "kind": "rust-uri-process",
+            "public_uris": ["proc://ast-scan/complexity/horizontal", "willman://operation/ast-horizontal-complexity/v1"],
+            "crate_name": "uri-ast-scan-rs",
+            "crate_version": "0.1.0",
+            "cargo_manifest": "Cargo.toml",
+            "transports": ["cdylib-c-abi", "json-stdin-stdout"],
+            "ffi_symbol": "uri_ast_scan_execute_json",
+            "python_bridge": {
+                "module": "uri_ast_scan_rs.bridge",
+                "fallback_module": "wellman.stream_flow",
+                "priority_chain": ["floor:rust-cdylib", "standard:rust-stdio", "opportunistic:python-fallback"],
+            },
+            "source": "provenance.json",
+            "production_binding_verified": False,
+        }
+        for name, value in files.items():
+            self.write(name, value)
+        provenance = {
+            "schema": "uriprocess.provenance/v1",
+            "repository": "https://example.test/dockuri/uri-ast-scan-rs",
+            "revision": "b" * 40,
+            "files": [
+                {
+                    "source": "original/" + name,
+                    "destination": name,
+                    "sha256": hashlib.sha256(value).hexdigest(),
+                    "mode": 0o644,
+                }
+                for name, value in files.items()
+            ],
+        }
+        self.write("uriprocess.json", manifest)
+        self.write("provenance.json", provenance)
+        return manifest, provenance
+
+    def test_rust_uri_package_preserves_crate_identity_ffi_and_priority_chain(self):
+        manifest, _ = self.rust_fixture()
+        result = check_package(self.package)
+        self.assertEqual(result["profile"], "rust-uri-v1")
+        self.assertEqual(result["public_uris"], manifest["public_uris"])
+
+    def test_rust_uri_drift_and_missing_ffi_symbol_rejected(self):
+        manifest, _ = self.rust_fixture()
+        manifest["ffi_symbol"] = "missing_ffi_symbol"
+        self.write("uriprocess.json", manifest)
+        self.rejected("URP-IDENTITY-001")
+        manifest["ffi_symbol"] = "uri_ast_scan_execute_json"
+        manifest["crate_name"] = "other-crate"
+        self.write("uriprocess.json", manifest)
+        self.rejected("URP-IDENTITY-001")
+
     def test_inventory_limit_and_cli_failure_are_bounded(self):
         self.fixture()
         with patch("conformance.MAX_ENTRIES", 2):

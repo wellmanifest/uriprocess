@@ -143,6 +143,129 @@
         }
       }
     },
+    "rust-uri-v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "kind",
+        "public_uris",
+        "crate_name",
+        "crate_version",
+        "cargo_manifest",
+        "transports",
+        "ffi_symbol",
+        "python_bridge",
+        "source",
+        "production_binding_verified"
+      ],
+      "properties": {
+        "schema": {
+          "const": "uriprocess.rust-package/v1"
+        },
+        "kind": {
+          "const": "rust-uri-process"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "profile": {
+          "const": "rust-uri-v1"
+        },
+        "public_uris": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 4,
+            "maxLength": 2048,
+            "pattern": "^[a-z][a-z0-9+.-]*://[^\\s]+$"
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "crate_name": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_-]*$"
+        },
+        "crate_version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        },
+        "cargo_manifest": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "transports": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "cdylib-c-abi",
+              "pyo3-abi3",
+              "json-stdin-stdout"
+            ]
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "ffi_symbol": {
+          "type": "string",
+          "pattern": "^[a-zA-Z_][a-zA-Z0-9_]*$"
+        },
+        "python_bridge": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "module",
+            "fallback_module",
+            "priority_chain"
+          ],
+          "properties": {
+            "module": {
+              "type": "string",
+              "minLength": 1
+            },
+            "entrypoint": {
+              "type": "string",
+              "minLength": 1
+            },
+            "fallback_module": {
+              "type": "string",
+              "minLength": 1
+            },
+            "priority_chain": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "floor:rust-cdylib",
+                  "standard:rust-stdio",
+                  "opportunistic:python-fallback"
+                ]
+              },
+              "minItems": 2,
+              "uniqueItems": true
+            }
+          }
+        },
+        "processes": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "source": {
+          "const": "provenance.json"
+        },
+        "production_binding_verified": {
+          "const": false
+        }
+      }
+    },
     "provenance": {
       "type": "object",
       "additionalProperties": false,
@@ -209,6 +332,9 @@
     },
     {
       "$ref": "#/$defs/python-native-v1"
+    },
+    {
+      "$ref": "#/$defs/rust-uri-v1"
     },
     {
       "$ref": "#/$defs/provenance"
