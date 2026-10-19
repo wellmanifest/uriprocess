@@ -1,7 +1,7 @@
 {
   "schema": "wellmanifest.uriprocess/policy/v1",
   "standard": "wellmanifest/uriprocess",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "home": "wellmanifest",
   "shape": "domain_pack",
   "profiles": {
@@ -76,6 +76,10 @@
     {
       "id": "URP-011",
       "requirement": "Rust URI-process packages (rust-uri-v1) MUST declare Cargo crate identity, dual-transport bindings (cdylib FFI and/or json-stdin-stdout binary), and a prioritized Python fallback chain (floor -> standard)."
+    },
+    {
+      "id": "URP-012",
+      "requirement": "Provide a universal polyglot invocation contract (`uri('<full-uri>', payload)` library function and `uri <full-uri> '<jsonl>'` CLI command) backed by `uriprocess.invocation/v1` and `uriprocess.invocation-result/v1` JSONL envelopes and a prioritized resolver (`floor:in_process_registry` -> `standard:dockuri_router` -> `standard:dockuri_cli_jsonl`)."
     }
   ],
   "errors": {

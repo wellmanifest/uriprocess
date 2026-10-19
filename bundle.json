@@ -1,11 +1,11 @@
 {
   "schema": "wellmanifest.uriprocess/bundle/v1",
   "standard": "wellmanifest/uriprocess",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "files": {
-    "VERSION": "1f930dd1f133c1f97a94fe3acb8db34372cf4c01ffdb2b3ff4ca72f9494121e9",
-    "policy.json": "4088f2193121e3819b757f767bea6a612a3c8a3a2a27f02f8494bd09350f2af5",
-    "schemas/package.schema.json": "9c040cb901154c7f8a093d03c569b8300fc3844845925292327567bff9b7c8a8",
-    "operations/conformance.py": "b91a305b8a1daa29bfc8512b9aaf480cb63b8c74a027830f3521a6b0d0f237f7"
+    "VERSION": "d915cc95d6ca8f47ae297713ed46d4e5c5d99ddd29fc3c61e263bdf305f2b5b0",
+    "policy.json": "bd12da5fcfcee10075e1837cd67a98a284195a51844dca352b2218f55fb0dcda",
+    "schemas/package.schema.json": "b38c752f1529992d5032d1fe32979d6321159025323f306c514022bbbc210f20",
+    "operations/conformance.py": "c24ba97775543cd7475223b6dd8bcbd944a1b26403b932441f8d26aeb67c9c71"
   }
 }

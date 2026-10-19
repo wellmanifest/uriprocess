@@ -3,7 +3,7 @@
   "schema": "wellmanifest.dsl/manifest/v1",
   "id": "wellmanifest.uriprocess",
   "name": "Wellmanifest URIprocess Packaging & Provenance Standard",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "status": "stable",
   "purpose": "Standard wytwarzania, certyfikacji pochodzenia (provenance) oraz hermetycznego pakowania procesow identyfikowanych przez URI.",
   "domain": "process-packaging-provenance",
@@ -42,12 +42,12 @@
     {
       "path": "policy.json",
       "role": "normative-source",
-      "digest": "sha256:45dd68d76bf5be9f0071d9ef8739422ddba25449d1241e3383a6c814e6cf5a74"
+      "digest": "sha256:bd12da5fcfcee10075e1837cd67a98a284195a51844dca352b2218f55fb0dcda"
     },
     {
       "path": "schemas/package.schema.json",
       "role": "schema",
-      "digest": "sha256:39609530f76079b8cf2c22939debefafba6afd36c87480c5c9ae065fbf9fd6aa"
+      "digest": "sha256:b38c752f1529992d5032d1fe32979d6321159025323f306c514022bbbc210f20"
     },
     {
       "path": "README.md",

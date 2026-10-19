@@ -324,6 +324,98 @@
           "maxItems": 4096
         }
       }
+    },
+    "invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "id",
+        "uri",
+        "args"
+      ],
+      "properties": {
+        "schema": {
+          "const": "uriprocess.invocation/v1"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "uri": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 2048,
+          "pattern": "^[a-z][a-z0-9+.-]*://[^\\s/?#]+/[^\\s?#]*$"
+        },
+        "args": {
+          "type": "object"
+        }
+      }
+    },
+    "invocation-result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema",
+        "id",
+        "uri",
+        "ok",
+        "tier",
+        "provider",
+        "result",
+        "receipt"
+      ],
+      "properties": {
+        "schema": {
+          "const": "uriprocess.invocation-result/v1"
+        },
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "uri": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 2048,
+          "pattern": "^[a-z][a-z0-9+.-]*://[^\\s/?#]+/[^\\s?#]*$"
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "tier": {
+          "enum": [
+            "floor",
+            "standard",
+            "opportunistic"
+          ]
+        },
+        "provider": {
+          "type": "string",
+          "minLength": 1
+        },
+        "result": {},
+        "receipt": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "request_sha256",
+            "sha256"
+          ],
+          "properties": {
+            "request_sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        }
+      }
     }
   },
   "oneOf": [
@@ -338,6 +430,12 @@
     },
     {
       "$ref": "#/$defs/provenance"
+    },
+    {
+      "$ref": "#/$defs/invocation"
+    },
+    {
+      "$ref": "#/$defs/invocation-result"
     }
   ]
 }

@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "operations"))
-from conformance import ConformanceError, check_package, main
+from conformance import ConformanceError, check_package, main, register_uri_process, scan_uri_links, uri
 
 
 class ConformanceTests(unittest.TestCase):
@@ -265,6 +265,38 @@ class ConformanceTests(unittest.TestCase):
             self.assertEqual(main(["--package", str(self.package)]), 2)
         self.assertEqual(json.loads(output.getvalue()), {"status": "invalid", "code": "URP-IDENTITY-001", "execution_authority": False})
 
+    def test_universal_uri_invocation_and_jsonl_envelopes(self):
+        register_uri_process("proc://demo/calc/double", lambda args: {"doubled": int(args.get("x", 0)) * 2})
+        single = uri("proc://demo/calc/double", {"x": 21})
+        self.assertEqual(single["schema"], "uriprocess.invocation-result/v1")
+        self.assertTrue(single["ok"])
+        self.assertEqual(single["tier"], "floor")
+        self.assertEqual(single["result"]["doubled"], 42)
+        self.assertEqual(len(single["receipt"]["sha256"]), 64)
+
+        jsonl = '{"id":"a","x":5}\n{"id":"b","x":10}'
+        batch = uri("proc://demo/calc/double", jsonl)
+        self.assertEqual(len(batch), 2)
+        self.assertEqual(batch[0]["result"]["doubled"], 10)
+        self.assertEqual(batch[1]["result"]["doubled"], 20)
+
+        with self.assertRaises(ConformanceError) as err:
+            uri("not-a-uri", {"x": 1})
+        self.assertEqual(err.exception.code, "URP-IDENTITY-001")
+
+    def test_polyglot_uri_link_scanner_validates_and_rejects_malformed_uris(self):
+        self.write("app.py", b'from wellman.uri import uri\nres = uri("proc://demo/calc/double", {"x": 1})\n')
+        self.write("run.sh", b'#!/usr/bin/env bash\nuri "proc://demo/calc/double" \'{"x":1}\'\n')
+        scan = scan_uri_links(self.package)
+        self.assertEqual(scan["status"], "passed")
+        self.assertEqual(scan["valid_link_count"], 2)
+
+        self.write("bad.py", b'uri("http://bad?token=secret", {})\n')
+        with self.assertRaises(ConformanceError) as err:
+            scan_uri_links(self.package)
+        self.assertEqual(err.exception.code, "URP-IDENTITY-001")
+
 
 if __name__ == "__main__":
     unittest.main()
+

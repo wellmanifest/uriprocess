@@ -235,12 +235,171 @@ def check_package(root):
             "execution_authority": False, "publication_authority": False, "production_verified": False}
 
 
+import re
+import sys
+
+_URI_CALL_RE = re.compile(
+    r"""(?:(?<![a-zA-Z0-9_])uri\s*\(\s*['"]([^'"]+)['"]|^\s*(?:wellman\s+)?uri\s+['"]?([a-z][a-z0-9+.-]*://[^\s'"]+)['"]?)"""
+)
+_SCAN_EXTS = {".py", ".sh", ".mjs", ".js", ".ts", ".rs", ".policy", ".curi"}
+_PROCESS_REGISTRY = {}
+
+
+def register_uri_process(address, handler):
+    validate_uri(address)
+    _PROCESS_REGISTRY[address] = handler
+
+
+def validate_invocation(envelope):
+    schema = document(STANDARD_ROOT, "schemas/package.schema.json")
+    validate_schema(schema, "invocation", envelope)
+    validate_uri(envelope["uri"])
+    return envelope
+
+
+def validate_invocation_result(result):
+    schema = document(STANDARD_ROOT, "schemas/package.schema.json")
+    validate_schema(schema, "invocation-result", result)
+    validate_uri(result["uri"])
+    return result
+
+
+def _builtin_check_package(args):
+    pkg = args.get("package", ".")
+    return check_package(Path(pkg))
+
+
+def _builtin_scan_links(args):
+    root = args.get("root", ".")
+    return scan_uri_links(Path(root))
+
+
+def _ensure_builtins():
+    if not _PROCESS_REGISTRY:
+        _PROCESS_REGISTRY["proc://uriprocess/conformance/check"] = _builtin_check_package
+        _PROCESS_REGISTRY["proc://uriprocess/invocation/scan"] = _builtin_scan_links
+
+
+def uri(address="", payload=None, *, stream=False):
+    """Universal URI process invocation function (URP-012) with JSONL envelope normalization."""
+    _ensure_builtins()
+    items = []
+    if payload is None:
+        require(bool(address), "URP-IDENTITY-001")
+        validate_uri(address)
+        items.append({"schema": "uriprocess.invocation/v1", "id": "r1", "uri": address, "args": {}})
+    elif isinstance(payload, dict):
+        target_uri = str(payload.get("uri") or address or "")
+        require(bool(target_uri), "URP-IDENTITY-001")
+        validate_uri(target_uri)
+        req_id = str(payload.get("id") or "r1")
+        args = payload["args"] if ("uri" in payload and isinstance(payload.get("args"), dict)) else (
+            {k: v for k, v in payload.items() if k not in ("schema", "id", "uri")} if "uri" in payload else dict(payload)
+        )
+        items.append({"schema": "uriprocess.invocation/v1", "id": req_id, "uri": target_uri, "args": args})
+    elif isinstance(payload, str):
+        lines = [ln.strip() for ln in payload.splitlines() if ln.strip()]
+        require(bool(lines), "URP-DATA-001")
+        for idx, line in enumerate(lines):
+            try:
+                parsed = json.loads(line)
+            except ValueError as exc:
+                raise ConformanceError("URP-DATA-001") from exc
+            require(isinstance(parsed, dict), "URP-DATA-001")
+            target_uri = str(parsed.get("uri") or address or "")
+            require(bool(target_uri), "URP-IDENTITY-001")
+            validate_uri(target_uri)
+            req_id = str(parsed.get("id") or f"r{idx + 1}")
+            args = parsed["args"] if ("uri" in parsed and isinstance(parsed.get("args"), dict)) else (
+                {k: v for k, v in parsed.items() if k not in ("schema", "id", "uri")} if "uri" in parsed else dict(parsed)
+            )
+            items.append({"schema": "uriprocess.invocation/v1", "id": req_id, "uri": target_uri, "args": args})
+    else:
+        raise ConformanceError("URP-DATA-001")
+
+    results = []
+    for req in items:
+        validate_invocation(req)
+        target_uri = req["uri"]
+        require(target_uri in _PROCESS_REGISTRY, "URP-IDENTITY-001")
+        raw_out = _PROCESS_REGISTRY[target_uri](req["args"])
+        req_canonical = json.dumps({"id": req["id"], "uri": target_uri, "args": req["args"]}, sort_keys=True)
+        req_sha = hashlib.sha256(req_canonical.encode("utf-8")).hexdigest()
+        res_canonical = json.dumps(raw_out, sort_keys=True, default=str)
+        res_sha = hashlib.sha256(f"{req_sha}:{res_canonical}".encode("utf-8")).hexdigest()
+        env = {
+            "schema": "uriprocess.invocation-result/v1",
+            "id": req["id"],
+            "uri": target_uri,
+            "ok": True,
+            "tier": "floor",
+            "provider": "in_process_registry",
+            "result": raw_out,
+            "receipt": {
+                "request_sha256": req_sha,
+                "sha256": res_sha,
+            },
+        }
+        validate_invocation_result(env)
+        results.append(env)
+
+    is_multi = stream or len(results) > 1 or (isinstance(payload, str) and "\n" in payload.strip())
+    return results if is_multi else results[0]
+
+
+def scan_uri_links(root):
+    """Scan polyglot scripts for `uri('<full-uri>', ...)` and `uri <full-uri> '<jsonl>'` links (URP-012)."""
+    root = Path(os.path.abspath(root))
+    files = inventory(root)
+    valid_links, invalid_links = [], []
+    for rel in sorted(files):
+        ext = PurePosixPath(rel).suffix
+        if ext not in _SCAN_EXTS:
+            continue
+        raw_bytes, _ = read_file(root, rel)
+        try:
+            text = raw_bytes.decode("utf-8")
+        except UnicodeError:
+            continue
+        for line_no, line in enumerate(text.splitlines(), start=1):
+            stripped = line.strip()
+            if stripped.startswith("#") or stripped.startswith("//"):
+                continue
+            for match in _URI_CALL_RE.finditer(line):
+                candidate = (match.group(1) or match.group(2) or "").strip()
+                if not candidate:
+                    continue
+                try:
+                    validate_uri(candidate)
+                    require(urlsplit(candidate).path != "/", "URP-IDENTITY-001")
+                    valid_links.append({"path": rel, "line": line_no, "uri": candidate})
+                except ConformanceError as exc:
+                    invalid_links.append({"path": rel, "line": line_no, "uri": candidate, "code": exc.code})
+    require(not invalid_links, "URP-IDENTITY-001")
+    return {
+        "schema": "wellmanifest.uriprocess/link-scan/v1",
+        "status": "passed",
+        "valid_link_count": len(valid_links),
+        "valid_links": valid_links,
+    }
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--package", type=Path, required=True)
+    parser.add_argument("--package", type=Path)
+    parser.add_argument("--check-links", type=Path)
+    parser.add_argument("--invoke", type=str)
+    parser.add_argument("--payload", type=str, default=None)
     args = parser.parse_args(argv)
     try:
-        result = check_package(args.package)
+        if args.invoke:
+            result = uri(args.invoke, args.payload)
+        elif args.check_links:
+            result = scan_uri_links(args.check_links)
+        elif args.package:
+            result = check_package(args.package)
+        else:
+            raise ConformanceError("URP-DATA-001")
     except ConformanceError as exc:
         print(json.dumps({"status": "invalid", "code": exc.code, "execution_authority": False}))
         return 2
@@ -250,3 +409,4 @@ def main(argv=None):
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
