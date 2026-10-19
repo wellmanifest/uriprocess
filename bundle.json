@@ -4,8 +4,8 @@
   "version": "0.3.0",
   "files": {
     "VERSION": "d915cc95d6ca8f47ae297713ed46d4e5c5d99ddd29fc3c61e263bdf305f2b5b0",
-    "policy.json": "bd12da5fcfcee10075e1837cd67a98a284195a51844dca352b2218f55fb0dcda",
+    "policy.json": "ad5d265d2263f5c83ea9bcb0390cdaa3187ff69590aaa4377866e8811fd49a20",
     "schemas/package.schema.json": "b38c752f1529992d5032d1fe32979d6321159025323f306c514022bbbc210f20",
-    "operations/conformance.py": "c24ba97775543cd7475223b6dd8bcbd944a1b26403b932441f8d26aeb67c9c71"
+    "operations/conformance.py": "743e92f338d3d1476385768c28e14ac62ec89e1ae65f5e3f00ba3fae3b016e20"
   }
 }

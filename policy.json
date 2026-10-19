@@ -79,6 +79,10 @@
     },
     {
       "id": "URP-012",
+      "title": "Universal polyglot uri() function and uri CLI JSONL invocation and lifecycle contract",
+      "severity": "error",
+      "description": "Scripts and applications across languages (Python, Rust, Bash, JS/TS) invoke URI processes via uri('<scheme://authority/path[?k=v]>', [jsonl_payload]) or the uri CLI with JSON/JSONL payloads, supporting process generation, modification, and alias-preserving relocation in dockuri.",
+      "verification": "conformance",
       "requirement": "Provide a universal polyglot invocation contract (`uri('<full-uri>', payload)` library function and `uri <full-uri> '<jsonl>'` CLI command) backed by `uriprocess.invocation/v1` and `uriprocess.invocation-result/v1` JSONL envelopes and a prioritized resolver (`floor:in_process_registry` -> `standard:dockuri_router` -> `standard:dockuri_cli_jsonl`)."
     }
   ],

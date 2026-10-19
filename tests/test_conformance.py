@@ -11,7 +11,8 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "operations"))
-from conformance import ConformanceError, check_package, main, register_uri_process, scan_uri_links, uri
+from conformance import STANDARD_ROOT, VERSION, ConformanceError, check_package, main, register_uri_process, scan_uri_links, uri
+from uri_contract import render_polyglot_uri_link, validate_uri_invocation
 
 
 class ConformanceTests(unittest.TestCase):
@@ -295,6 +296,60 @@ class ConformanceTests(unittest.TestCase):
         with self.assertRaises(ConformanceError) as err:
             scan_uri_links(self.package)
         self.assertEqual(err.exception.code, "URP-IDENTITY-001")
+
+    def test_release_0_3_0_and_urp_012_policy_contract(self):
+        self.assertEqual(VERSION, "0.3.0")
+        self.assertEqual((STANDARD_ROOT / "VERSION").read_text().strip(), "0.3.0")
+        policy = json.loads((STANDARD_ROOT / "policy.json").read_text())
+        bundle = json.loads((STANDARD_ROOT / "bundle.json").read_text())
+        self.assertEqual(policy["version"], "0.3.0")
+        self.assertEqual(bundle["version"], "0.3.0")
+        by_id = {req["id"]: req for req in policy["requirements"]}
+        self.assertIn("URP-012", by_id)
+        urp012 = by_id["URP-012"]
+        self.assertEqual(urp012["title"], "Universal polyglot uri() function and uri CLI JSONL invocation and lifecycle contract")
+        self.assertEqual(urp012["severity"], "error")
+        self.assertEqual(urp012["verification"], "conformance")
+        self.assertIn("dockuri", urp012["description"])
+
+    def test_validate_uri_invocation_single_query_and_jsonl(self):
+        single = validate_uri_invocation("proc://system/process/manage/v1?action=relocate", {"from": "proc://a/b", "to": "proc://c/d"})
+        self.assertTrue(single["valid"])
+        self.assertEqual(single["uri"], "proc://system/process/manage/v1")
+        self.assertEqual(single["mode"], "single")
+        self.assertTrue(single["is_lifecycle_op"])
+        self.assertEqual(single["args"], {"action": "relocate", "from": "proc://a/b", "to": "proc://c/d"})
+
+        stream = validate_uri_invocation("willman://operation/ast-horizontal-complexity/v1", '{"path":"a.py"}\n{"path":"b.py"}')
+        self.assertEqual(stream["mode"], "jsonl")
+        self.assertEqual(stream["record_count"], 2)
+        self.assertFalse(stream["is_lifecycle_op"])
+
+        with self.assertRaises(ConformanceError) as err1:
+            validate_uri_invocation("invalid_uri", {})
+        self.assertEqual(err1.exception.code, "URP-IDENTITY-001")
+
+        with self.assertRaises(ConformanceError) as err2:
+            validate_uri_invocation("proc://demo/calc/double", "{not-json}")
+        self.assertEqual(err2.exception.code, "URP-DATA-001")
+
+    def test_render_polyglot_uri_link_across_five_languages(self):
+        target = "proc://system/process/manage/v1"
+        defaults = {"action": "status"}
+        for lang, marker in (
+            ("python", "from dockuri_uri import uri"),
+            ("bash", 'uri "proc://system/process/manage/v1"'),
+            ("javascript", 'import { uri } from "dockuri-uri";'),
+            ("typescript", "Promise<unknown>"),
+            ("rust", "use dockuri_uri::uri;"),
+        ):
+            snippet = render_polyglot_uri_link(target, lang=lang, defaults=defaults)
+            self.assertIn(marker, snippet)
+            self.assertIn(target, snippet)
+            self.assertIn("status", snippet)
+
+        with self.assertRaises(ValueError):
+            render_polyglot_uri_link(target, lang="cobol")
 
 
 if __name__ == "__main__":

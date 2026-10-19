@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 from jsonschema import Draft202012Validator
 
 STANDARD_ROOT = Path(__file__).resolve().parents[1]
+VERSION = "0.3.0"
 MAX_BYTES = 8 * 1024 * 1024
 MAX_ENTRIES = 4096
 
