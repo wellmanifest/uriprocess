@@ -42,7 +42,7 @@
     {
       "path": "policy.json",
       "role": "normative-source",
-      "digest": "sha256:bd12da5fcfcee10075e1837cd67a98a284195a51844dca352b2218f55fb0dcda"
+      "digest": "sha256:ad5d265d2263f5c83ea9bcb0390cdaa3187ff69590aaa4377866e8811fd49a20"
     },
     {
       "path": "schemas/package.schema.json",
