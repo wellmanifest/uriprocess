@@ -308,7 +308,7 @@
     "standardAdoption": {
       "sourceRepository": "wellmanifest/new-project",
       "fromRevision": null,
-      "toRevision": "f784faecc05879fcec004eb76073305eb6507a3d"
+      "toRevision": "3926cecf965cd03a39cc992aa40bf82ae2e97a13"
     }
   }
 }

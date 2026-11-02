@@ -238,13 +238,18 @@ def check_instance_identity(root: Path, data: dict, source_path: Path) -> list[s
     declared = data.get("repository")
     if not isinstance(declared, str) or not declared:
         return []
+    own = own_identity(root)
     if declared == UNRESOLVED_ADOPTER:
+        # The managed updater is the only writer of the adoption lock, so the
+        # remedy is a rerun that binds the detected name, never a manual edit.
+        detected = (f"detected {own!r}; rerun" if own else
+                    "no origin remote detected; add it or pass --repository OWNER/NAME and rerun")
         return [
             f"{source_path} still carries the unadapted template identity "
-            f"{UNRESOLVED_ADOPTER!r}; set repository, workflowFile and the check "
-            "names this repository's own workflows publish"
+            f"{UNRESOLVED_ADOPTER!r}; {detected} the managed updater "
+            "(create_adoption_lock.py --target-root . --source-revision <locked "
+            "sourceRevision> --upgrade) to bind it to the repository's own workflow checks"
         ]
-    own = own_identity(root)
     if own is None or declared.casefold() == own.casefold():
         return []
     return [

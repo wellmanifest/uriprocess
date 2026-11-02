@@ -59,7 +59,8 @@ VERDICT_LINE = re.compile(
 )
 REJECTED_LINE = re.compile(r"^REJECTED\s+(\S+)\s+BECAUSE\s+(.+)$")
 ADVISORY_LINE = re.compile(
-    r'^ADVISORY\s+llm_verdict\s*=\s*"([^"]*)"\s+MODEL\s+"([^"]*)"\s*$'
+    r'^ADVISORY\s+llm_verdict\s*=\s*("(?:[^"\\]|\\.)*")\s+'
+    r'MODEL\s+("(?:[^"\\]|\\.)*")\s*$'
 )
 ASSERT_LINE = re.compile(r"^ASSERT\s+(.+)$")
 
@@ -126,10 +127,14 @@ def apply_decision_line(record: dict[str, Any], line: str) -> bool:
         return True
     match = ADVISORY_LINE.match(line)
     if match:
-        record["advisory"] = {
-            "llmVerdict": match.group(1),
-            "model": match.group(2),
-        }
+        try:
+            advisory = {
+                "llmVerdict": json.loads(match.group(1)),
+                "model": json.loads(match.group(2)),
+            }
+        except json.JSONDecodeError:
+            return False
+        record["advisory"] = advisory
         return True
     match = ASSERT_LINE.match(line)
     if match:
@@ -193,17 +198,19 @@ def to_dsl(record: dict[str, Any]) -> str:
         f"VERDICT {record['verdict']} AUTHORITY {record['verdictAuthority']}"
     )
     rejected = record["rejected"]
+    because = " ".join(str(rejected["because"]).splitlines()).strip()
     lines.append(
-        f"REJECTED {rejected['alternative']} BECAUSE {rejected['because']}"
+        f"REJECTED {rejected['alternative']} BECAUSE {because}"
     )
     adv = record.get("advisory")
     if adv:
         lines.append(
-            f'ADVISORY llm_verdict = "{adv.get("llmVerdict", "")}" '
-            f'MODEL "{adv.get("model", "")}"'
+            f'ADVISORY llm_verdict = {format_value(adv.get("llmVerdict", ""))} '
+            f'MODEL {format_value(adv.get("model", ""))}'
         )
     for assertion in record.get("assertions") or []:
-        lines.append(f"ASSERT {assertion}")
+        assert_text = " ".join(str(assertion).splitlines()).strip()
+        lines.append(f"ASSERT {assert_text}")
     return "\n".join(lines) + "\n"
 
 
@@ -313,21 +320,24 @@ def validate_record(record: dict[str, Any]) -> list[str]:
 
 
 def split_decision_blocks(markdown: str) -> list[str]:
-    """Extract fenced ```dsl DECISION ... blocks or bare DECISION sequences."""
+    """Extract bare and fenced DSL decisions once, in document order."""
+    def decisions(text: str) -> list[str]:
+        parts = re.split(r"(?=^DECISION\s+D-)", text.strip(), flags=re.MULTILINE)
+        return [part.strip() for part in parts if part.strip().startswith("DECISION ")]
+
     blocks: list[str] = []
-    fence = re.findall(r"```dsl\n(.*?)```", markdown, flags=re.DOTALL)
-    for body in fence:
-        if "DECISION " in body:
-            # may contain multiple DECISION records
-            parts = re.split(r"(?=^DECISION\s+D-)", body.strip(), flags=re.MULTILINE)
-            for part in parts:
-                part = part.strip()
-                if part.startswith("DECISION "):
-                    blocks.append(part)
-    if blocks:
-        return blocks
-    parts = re.split(r"(?=^DECISION\s+D-)", markdown.strip(), flags=re.MULTILINE)
-    return [p.strip() for p in parts if p.strip().startswith("DECISION ")]
+    cursor = 0
+    fences = re.finditer(
+        r"^[ \t]{0,3}```([^\n]*)\n(.*?)^[ \t]{0,3}```[ \t]*(?:\n|$)",
+        markdown, flags=re.MULTILINE | re.DOTALL,
+    )
+    for fence in fences:
+        blocks.extend(decisions(markdown[cursor:fence.start()]))
+        if fence.group(1).strip() == "dsl":
+            blocks.extend(decisions(fence.group(2)))
+        cursor = fence.end()
+    blocks.extend(decisions(markdown[cursor:]))
+    return blocks
 
 
 def check_append_only(previous_markdown: str, current_markdown: str) -> list[str]:

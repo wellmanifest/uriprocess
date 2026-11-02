@@ -35,7 +35,9 @@ _previous_bytecode_policy = sys.dont_write_bytecode
 sys.dont_write_bytecode = True
 try:
     try:
-        from ticket_activity import ActivityError, delivery_landed, resolve as resolve_ticket_activity
+        from ticket_activity import (ActivityError, delivery_landed,
+                                     parse_ticket_state_text as _shared_ticket_state,
+                                     resolve as resolve_ticket_activity)
     except ModuleNotFoundError:
         _activity_spec = importlib.util.spec_from_file_location(
             "ticket_activity", Path(__file__).with_name("ticket_activity.py")
@@ -48,6 +50,7 @@ try:
         ActivityError = _activity_module.ActivityError
         delivery_landed = _activity_module.delivery_landed
         resolve_ticket_activity = _activity_module.resolve
+        _shared_ticket_state = _activity_module.parse_ticket_state_text
 finally:
     sys.dont_write_bytecode = _previous_bytecode_policy
 
@@ -76,18 +79,18 @@ POLICY_DSL_LOCK = {
     "schema": "new-project.policy-dsl-lock/v1",
     "dependency": {
         "id": "wellmanifest/policy-dsl",
-        "version": "0.1.0-dev",
+        "version": "0.2.0-dev",
         "sourceRepository": "wellmanifest/policy-dsl",
-        "sourceRevision": "daaf7b7b96312a2469de1b4799f2f81c7396de4e",
+        "sourceRevision": "0ffa41efd903d3e0fc3dbf4431f2771b34c1f70e",
         "sourcePath": "tests/policy_dsl_check.py",
-        "sourceSha256": "1ebed8ada3f687bf82de235b352ec1ce94b606887ad2a1657d66bd58f04314e8",
+        "sourceSha256": "15439706ef54953ff90a20bbd2a89c9fef2e6ef9ec7a423025d9d597c78a848c"
     },
     "installation": {
         "packageSourcePath": "scripts/policy_dsl_check.py",
         "managedTargetPath": ".governance/policy_dsl_check.py",
         "lockTargetPath": ".governance/policy-dsl.lock.json",
-        "networkRequired": False,
-    },
+        "networkRequired": False
+    }
 }
 ACTIVE_DEFAULT = {"IN_PROGRESS"}
 TICKET_ACTIVITY_ERROR = "GOV-TICKET-ACTIVITY-001"
@@ -179,6 +182,9 @@ class Report:
         data = {
             "schema": "new-project.governance-report/v1",
             "runtimeVersion": RUNTIME_VERSION,
+            "validation_scope": "static-governance",
+            "runtime_enforcement": "not_checked",
+            "grants_execution_authority": False,
             "root": ".",
             "status": "passed" if self.errors == 0 else "failed",
             "summary": {
@@ -395,6 +401,37 @@ def load_policy_dsl_module(root: Path) -> Any:
     return module
 
 
+HOST_MERGE_START = "<!-- wellmanifest:autonomous-merge:start -->"
+HOST_MERGE_END = "<!-- wellmanifest:autonomous-merge:end -->"
+# The superseded block granted merge on green and administrative bypass; every
+# observed copy cites this revision of wellmanifest/merge.
+STALE_HOST_MERGE_SIGNATURE = "wellmanifest/merge@ticket-008"
+
+
+def check_host_merge_policy(root: Path, report: Report) -> None:
+    """Warn while host instructions still carry the superseded merge authority."""
+    stale = []
+    for name in ("AGENTS.md", "CLAUDE.md", "GEMINI.md"):
+        path = root / name
+        if not path.is_file() or path.is_symlink():
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        begin, end = text.find(HOST_MERGE_START), text.find(HOST_MERGE_END)
+        block = text[begin:end] if 0 <= begin < end else ""
+        if STALE_HOST_MERGE_SIGNATURE in block:
+            stale.append(name)
+    if stale:
+        report.add(
+            "GOV-HOST-MERGE-001",
+            "Host instructions carry the superseded autonomous-merge block that allows "
+            "agents to merge on green or bypass review.",
+            "Preview and apply scripts/host_publication_policy.py from the standard in an owned "
+            "ticket; only the independent Validator may approve and merge.",
+            stale,
+            severity="warning",
+        )
+
+
 def check_required_checks_declaration(root: Path, report: Report) -> None:
     script = next(
         (
@@ -414,7 +451,12 @@ def check_required_checks_declaration(root: Path, report: Report) -> None:
         if spec is None or spec.loader is None:
             raise ValueError("required-checks gate cannot be imported")
         module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        previous_bytecode_policy = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous_bytecode_policy
         code = module.main(["--root", str(root)])
     except SystemExit as error:
         code = error.code if isinstance(error.code, int) else 1
@@ -440,8 +482,12 @@ def check_policy_dsl(root: Path, report: Report) -> None:
     if not contributing.is_file():
         return
     try:
+        source = contributing.read_text(encoding="utf-8")
+        # Only a document that opts into the Policy DSL with a dsl fence is validated.
+        if not any(line.strip() == "```dsl" for line in source.splitlines()):
+            return
         policy_dsl = load_policy_dsl_module(root)
-        policy_dsl.parse_markdown(contributing.read_text(encoding="utf-8"))
+        policy_dsl.parse_markdown(source)
     except Exception as error:
         report.add(
             "GOV-POLICY-DSL-001",
@@ -596,7 +642,20 @@ def effective_delivery_policy(policy: dict[str, Any], complexity: str) -> dict[s
     return policy if profile is None else {**policy, **profile}
 
 
-def field_set_hint(value: Any, required: set[str], optional: set[str] = frozenset()) -> str:
+# Where each recognized delivery field belongs, so a misplaced one names its required path.
+DELIVERY_FIELD_PATHS = {
+    **{name: f"delivery.{name}" for name in (
+        "acceptedBaseSha", "targetBranch", "outcome", "nonGoals", "complexity", "estimatedMinutes",
+        "budgets", "architecture", "runtimeDependencies", "validation")},
+    **{name: f"delivery.budgets.{name}" for name in (
+        "maxImplementationFiles", "maxAffectedComponents", "maxPublicInterfaceChanges", "maxRuntimeDependencies")},
+    **{name: f"delivery.architecture.{name}" for name in (
+        "status", "decision", "components", "responsibilityChanges", "interfaceChanges", "dataChanges", "ui", "rollback")},
+}
+
+
+def field_set_hint(value: Any, required: set[str], optional: set[str] = frozenset(),
+                   located: dict[str, str] | None = None) -> str:
     """Name the missing and unexpected keys so an agent can repair an intent in one edit."""
     if not isinstance(value, dict):
         return f" (expected an object with {', '.join(sorted(required))}; got {type(value).__name__})"
@@ -605,6 +664,7 @@ def field_set_hint(value: Any, required: set[str], optional: set[str] = frozense
     parts = [f"missing: {', '.join(missing)}"] if missing else []
     if unexpected:
         parts.append(f"unexpected: {', '.join(unexpected)}")
+    parts.extend(f"move {name} to {located[name]}" for name in unexpected if name in (located or {}))
     return f" ({'; '.join(parts)})" if parts else ""
 
 
@@ -631,7 +691,7 @@ def delivery_budgets_error(budgets: Any) -> str | None:
         "maxPublicInterfaceChanges", "maxRuntimeDependencies",
     }
     if not isinstance(budgets, dict) or set(budgets) != fields:
-        return "delivery budgets are incomplete" + field_set_hint(budgets, fields)
+        return "delivery budgets are incomplete" + field_set_hint(budgets, fields, located=DELIVERY_FIELD_PATHS)
     if not integer_fields_valid(budgets, fields):
         return "delivery budgets must be integers"
     if budgets["maxImplementationFiles"] < 1 or budgets["maxAffectedComponents"] < 1:
@@ -730,7 +790,8 @@ def delivery_architecture_error(architecture: Any) -> str | None:
         "interfaceChanges", "dataChanges", "ui", "rollback",
     }
     if not isinstance(architecture, dict) or set(architecture) != fields:
-        return "delivery architecture decision is incomplete" + field_set_hint(architecture, fields)
+        return "delivery architecture decision is incomplete" + field_set_hint(
+            architecture, fields, located=DELIVERY_FIELD_PATHS)
     if architecture.get("status") != "accepted":
         return f"delivery architecture status must be accepted before implementation (got {architecture.get('status')!r})"
     for name in ("decision", "rollback"):
@@ -913,7 +974,7 @@ def check_physical_contract_changes(
         )
 
 
-PLACEMENT_HOMES = {"wellmanifest", "subactor", "semcod"}
+PLACEMENT_HOMES = {"wellmanifest", "subactor", "semcod", "paxlet-com", "dockuri"}
 PLACEMENT_SHAPES = {"domain_pack", "runtime_service", "both"}
 PLACEMENT_ADOPT = re.compile(r"^wellmanifest/[a-z0-9][a-z0-9-]*$")
 
@@ -923,15 +984,15 @@ def placement_error(value: Any) -> str | None:
     allowed = required | {"runtimeOwner", "adopt"}
     if not isinstance(value, dict) or not required <= set(value) <= allowed:
         return "placement must contain home and shape"
-    if value["home"] not in PLACEMENT_HOMES:
+    if not isinstance(value.get("home"), str) or value["home"] not in PLACEMENT_HOMES:
         return "placement home is invalid"
-    if value["shape"] not in PLACEMENT_SHAPES:
+    if not isinstance(value.get("shape"), str) or value["shape"] not in PLACEMENT_SHAPES:
         return "placement shape is invalid"
     runtime_owner = value.get("runtimeOwner")
-    if runtime_owner is not None and runtime_owner not in PLACEMENT_HOMES:
+    if runtime_owner is not None and (not isinstance(runtime_owner, str) or runtime_owner not in PLACEMENT_HOMES):
         return "placement runtimeOwner is invalid"
     if value["home"] == "wellmanifest" and value["shape"] == "runtime_service":
-        return "runtime_service must not HOME wellmanifest; ADOPT packs from subactor or semcod"
+        return "runtime_service must not HOME wellmanifest; ADOPT packs from a product organization"
     adopt = value.get("adopt")
     if adopt is not None and (
         not string_list(adopt) or not all(PLACEMENT_ADOPT.fullmatch(item) for item in adopt)
@@ -1125,7 +1186,8 @@ def delivery_intent_error(value: Any) -> str | None:
     }
     optional_fields = {"standardAdoption", "snapshotMigration"}
     if not isinstance(value, dict) or not required_fields <= set(value) <= required_fields | optional_fields:
-        return "delivery must contain exactly the bounded-delivery fields" + field_set_hint(value, required_fields, optional_fields)
+        return "delivery must contain exactly the bounded-delivery fields" + field_set_hint(
+            value, required_fields, optional_fields, located=DELIVERY_FIELD_PATHS)
     if "snapshotMigration" in value:
         try:
             migration_error = snapshot_migration_runtime().contract_error(value["snapshotMigration"])
@@ -1358,14 +1420,12 @@ def check_history_order(
     _, commit = first_implementation
     ticket_intent = f"{ticket_root.rstrip('/')}/{ticket_name}/{intent_path}"
     try:
-        subprocess.run(
-            ["git", "cat-file", "-e", f"{commit}:{ticket_intent}"], cwd=root,
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except subprocess.CalledProcessError:
+        raw_blob = git_output(root, ["cat-file", "-p", f"{commit}:{ticket_intent}"])
+        json.loads(raw_blob.decode("utf-8"))
+    except (subprocess.CalledProcessError, ValueError, UnicodeDecodeError):
         report.add(
             "GOV-INTENT-003",
-            f"{ticket_intent} was absent from the first material implementation commit.",
+            f"{ticket_intent} was absent or invalid in the first material implementation commit.",
             "Include the validated intent atomically with the first material commit; do not create a separate plan-only commit.",
             [ticket_intent], {"firstImplementationCommit": commit},
         )
@@ -1492,12 +1552,27 @@ def integration_policy_valid(integration: Any, workstreams: dict[str, Any]) -> b
     )
 
 
+def idle_takeover_policy_valid(policy: Any) -> bool:
+    def bounded(value: Any, low: int, high: int) -> bool:
+        return isinstance(value, int) and not isinstance(value, bool) and low <= value <= high
+    return (
+        isinstance(policy, dict)
+        and set(policy) == {"enabled", "idleMinutes", "leaseMinutes"}
+        and isinstance(policy["enabled"], bool)
+        and bounded(policy["idleMinutes"], 5, 240)
+        and bounded(policy["leaseMinutes"], 15, 480)
+        and policy["leaseMinutes"] > policy["idleMinutes"]
+    )
+
+
 def coordination_policy_valid(coordination: Any) -> bool:
     fields = {
         "mode", "maxActiveTicketsPerWorkstream", "rejectActiveScopeOverlap",
         "workstreams", "integration",
     }
-    if not isinstance(coordination, dict) or set(coordination) != fields:
+    if not isinstance(coordination, dict) or set(coordination) - {"idleTakeover"} != fields:
+        return False
+    if "idleTakeover" in coordination and not idle_takeover_policy_valid(coordination["idleTakeover"]):
         return False
     limit = coordination.get("maxActiveTicketsPerWorkstream")
     settings_valid = (
@@ -1700,12 +1775,7 @@ def parse_ticket_state(readme: Path) -> tuple[str | None, str | None]:
 
 
 def parse_ticket_state_text(text: str) -> tuple[str | None, str | None]:
-    status_match = re.search(r"(?mi)^-[ \t]+\*\*Status\*\*:[ \t]*([A-Z_]+)[ \t]*$", text)
-    state_match = re.search(r"(?mi)^-[ \t]+\*\*Workflow state\*\*:[ \t]*([A-Z_]+)[ \t]*$", text)
-    return (
-        status_match.group(1).upper() if status_match else None,
-        state_match.group(1).upper() if state_match else None,
-    )
+    return _shared_ticket_state(text)
 
 
 def ticket_directories(root: Path, config: dict[str, Any]) -> list[Path]:
@@ -1872,8 +1942,9 @@ def load_repository_policy_ticket(
         "integrationTicket": None,
         "classification": {"kind": "SERVICE", "priority": "P2", "origin": "requested"},
     }
+    ticket_root = policy.get("tickets", {}).get("root", "project")
     return TicketRecord(
-        root / str(raw_path),
+        root / str(ticket_root) / adapter["ticket"],
         adapter["status"],
         adapter["workflow"],
         intent,
@@ -2780,12 +2851,19 @@ def validate_domain_errors(root: Path, errors: dict[str, Any], domain: str, comm
         {"code", "documentation", "retryability", "status", "rejectionEvent"},
         "errors",
     )
+    command_for_code = {
+        code: [cmd_name for cmd_name, cmd in commands.items() if code in cmd["rejects"]]
+        for code in error_index
+    }
     for error in error_index.values():
         contract_document(
             root, error["documentation"], f"error/{error['code']}.md", "error",
         )
         if error["rejectionEvent"] not in event_index:
             raise ValueError("error rejection event is unknown")
+        emitter = event_index[error["rejectionEvent"]]["emittedBy"]
+        if emitter not in command_for_code.get(error["code"], []):
+            raise ValueError("error rejection event emitter does not match rejecting command")
         if error["retryability"] not in {
             "never", "after-correction", "after-new-evidence",
         }:
@@ -2863,6 +2941,22 @@ def check_required_files(root: Path, manifest: dict[str, Any], report: Report) -
             )
 
 
+def _section_aware_toml_version(content: str, section_names: tuple[str, ...]) -> str | None:
+    current_section = None
+    for line in content.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("[") and line.endswith("]"):
+            current_section = line.strip("[]").strip()
+            continue
+        if current_section in section_names:
+            m = re.match(r'^version\s*=\s*["\']([^"\']+)["\']', line)
+            if m:
+                return m.group(1).strip()
+    return None
+
+
 def _extract_pyproject_version(content: str) -> str | None:
     if tomllib is not None:
         try:
@@ -2878,8 +2972,7 @@ def _extract_pyproject_version(content: str) -> str | None:
                 return flit["version"].strip()
         except Exception:
             pass
-    m = re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
-    return m.group(1).strip() if m else None
+    return _section_aware_toml_version(content, ("project", "tool.poetry", "tool.flit.metadata"))
 
 
 def _extract_setup_py_version(content: str) -> str | None:
@@ -2899,8 +2992,7 @@ def _extract_cargo_version(content: str) -> str | None:
                 return pkg["version"].strip()
         except Exception:
             pass
-    m = re.search(r'^\s*version\s*=\s*["\']([^"\']+)["\']', content, re.MULTILINE)
-    return m.group(1).strip() if m else None
+    return _section_aware_toml_version(content, ("package",))
 
 
 def check_version_parity(root: Path, manifest: dict[str, Any], report: Report) -> None:
@@ -3217,12 +3309,13 @@ def find_python_secrets(tree: ast.AST) -> list[str]:
                     if is_secret_literal(v):
                         add_field(k.value)
         elif isinstance(node, ast.Compare):
-            if isinstance(node.left, ast.Name) and SECRET_FIELD_NAME_RE.search(node.left.id):
-                for comp in node.comparators:
-                    if is_secret_literal(comp):
-                        add_field(node.left.id)
-        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            pos_args = node.args.args
+            operands = [node.left, *node.comparators]
+            literal = next((value for value in operands if is_secret_literal(value)), None)
+            if literal is not None:
+                for target in operands:
+                    assigned_literal(target, literal)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            pos_args = [*node.args.posonlyargs, *node.args.args]
             defaults = node.args.defaults
             for arg, default in zip(pos_args[-len(defaults):], defaults):
                 if SECRET_FIELD_NAME_RE.search(arg.arg) and is_secret_literal(default):
@@ -3496,20 +3589,24 @@ def observe_delivery_bases(root, delivery, accepted_sha, intent_path, base, repo
     return observed
 
 
+def _is_git_ancestor(root: Path, ancestor_sha: str, descendant_sha: str) -> bool:
+    result = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", ancestor_sha, descendant_sha],
+        cwd=root,
+        check=False,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
 def check_observed_delivery_bases(root, accepted_commit, observed, component_patterns, record, intent_path, report) -> None:
     checked: set[str] = set()
     for source, observed_sha in observed:
         if observed_sha in checked or observed_sha == accepted_commit:
             continue
         checked.add(observed_sha)
-        ancestor = subprocess.run(
-            ["git", "merge-base", "--is-ancestor", accepted_commit, observed_sha],
-            cwd=root,
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        if ancestor.returncode != 0:
+        if not _is_git_ancestor(root, accepted_commit, observed_sha):
             report.add(
                 "GOV-BASE-001",
                 f"Ticket {record.directory.name} accepted base is not an ancestor of the observed target.",
@@ -4678,6 +4775,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=".governance/work-classification.dsl.json",
     )
     parser.add_argument("--base")
+    parser.add_argument("--infer-ticket-base", action="store_true",
+                        help="On a ticket/NNN-* branch without --base, validate from its merge-base with origin/<target>")
     parser.add_argument("--head", default="HEAD")
     parser.add_argument("--changed-file", action="append", default=[])
     parser.add_argument("--actor", choices=["agent", "human", "ci"], default="agent")
@@ -4839,7 +4938,12 @@ def check_change_lease(root: Path, report: Report) -> None:
         return
     module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(module)
+        previous_bytecode_policy = sys.dont_write_bytecode
+        try:
+            sys.dont_write_bytecode = True
+            spec.loader.exec_module(module)
+        finally:
+            sys.dont_write_bytecode = previous_bytecode_policy
         findings = module.validate_repository(root)
     except Exception as error:
         report.add(
@@ -4942,6 +5046,50 @@ def file_sha256_or_none(path: Path | None) -> str | None:
         return "read-error"
 
 
+def infer_ticket_branch_base(root: Path, manifest_path: Path | None, head: str, report: Report) -> str | None:
+    """Bind a bare local run on a ticket branch to the range its PR will be validated on.
+
+    Without a base, only adoption tickets infer one, so an ordinary ticket's
+    committed implementation is invisible and a missing delivery contract
+    passes. A branch that cannot be bound fails closed instead.
+    """
+    branch = subprocess.run(["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+                            cwd=root, capture_output=True, text=True, check=False).stdout.strip()
+    match = re.fullmatch(r"ticket/([0-9]+)-[^/]+", branch)
+    if match is None:
+        return None
+    try:
+        targets = load_json(manifest_path)["delivery"]["targetBranches"] if manifest_path else None
+    except (OSError, ValueError, KeyError, TypeError):
+        targets = None
+    try:
+        declared = load_json(root / f"project/ticket-{match.group(1)}/intent.json")["delivery"]["targetBranch"]
+    except (OSError, ValueError, KeyError, TypeError):
+        declared = None
+    if isinstance(targets, list) and len(targets) == 1:
+        target = targets[0]
+    else:
+        # Several or no policy targets: only the ticket's own declaration may choose.
+        target = declared if not isinstance(targets, list) or declared in targets else None
+    target = target if branch_name(target) else None
+    remote = f"refs/remotes/origin/{target}"
+    base = (subprocess.run(["git", "merge-base", head, remote], cwd=root,
+                           capture_output=True, text=True, check=False).stdout.strip() if target else "")
+    if re.fullmatch(r"[0-9a-f]{40,64}", base) is None:
+        report.add(
+            "GOV-BASE-001",
+            f"Ticket branch {branch} has no validation base: "
+            + (f"{remote} is missing or unrelated to {head}." if target
+               else "the manifest names no single delivery target branch for it."),
+            f"Run git fetch origin {target or '<target>'} or pass --base explicitly; "
+            "a bare run never validates a ticket branch without a range.",
+            [], {"branch": branch, "targetBranch": target},
+        )
+        return None
+    print(f"governance-check: --base {base} (merge-base of {branch} and origin/{target})", file=sys.stderr)
+    return base
+
+
 def git_rev_parse(root: Path, ref: str) -> str:
     try:
         proc = subprocess.run(
@@ -4964,8 +5112,25 @@ def compute_preflight_cache_key(
     profiles_path: Path | None,
     work_classification_path: Path | None,
 ) -> str | None:
+    # A Git dirty digest cannot bind external ticket input, including SQLite WAL.
+    # Let the ordinary reader recheck its current contents and snapshot pins.
+    if not args.base or any((args.ticket_database, args.ticket_snapshot, args.ticket_snapshot_sha256)):
+        return None
+    try:
+        storage = git_output(root, ["config", "--local", "--get", "new-project.ticketStorage"]).decode().strip()
+    except subprocess.CalledProcessError as error:
+        if error.returncode != 1:
+            return None
+        storage = "files"
+    except (OSError, UnicodeError):
+        return None
+    if storage != "files":
+        return None
+
     head_sha = git_rev_parse(root, args.head or "HEAD")
-    base_sha = git_rev_parse(root, args.base) if args.base else "inferred"
+    base_sha = git_rev_parse(root, args.base)
+    if head_sha.startswith("unresolved:") or base_sha.startswith("unresolved:"):
+        return None
     dirty_digest = compute_git_dirty_digest(root)
     if dirty_digest == "git-status-failed":
         return None
@@ -5122,6 +5287,7 @@ def run_governance_checks(
     timed_step(report, "load_work_classification", load_work_classification, root, report, args.work_classification)
     timed_step(report, "check_lock", check_lock, root, lock_path, manifest, report)
     timed_step(report, "check_policy_dsl", check_policy_dsl, root, report)
+    timed_step(report, "check_host_merge_policy", check_host_merge_policy, root, report)
     timed_step(report, "check_required_checks_declaration", check_required_checks_declaration, root, report)
     timed_step(report, "check_agent_hosts", check_agent_hosts, root, args.actor, report)
     timed_step(report, "check_required_files", check_required_files, root, manifest, report)
@@ -5215,6 +5381,9 @@ def main(argv: list[str] | None = None) -> int:
         work_class_path = safe_repo_path(root, args.work_classification) if args.work_classification else None
     except ValueError:
         pass
+
+    if args.infer_ticket_base and args.base is None and not args.changed_file:
+        args.base = infer_ticket_branch_base(root, manifest_path, args.head, report)
 
     if cache_allowed and manifest_path and manifest_path.is_file():
         cache_key = compute_preflight_cache_key(

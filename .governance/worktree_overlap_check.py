@@ -444,10 +444,9 @@ def merge_tree_conflicts(path: Path, left: str, right: str) -> tuple[str, ...] |
     """
     try:
         result = subprocess.run(
-            ["git", "-C", str(path), "merge-tree", "--write-tree", "--name-only", left, right],
+            ["git", "-C", str(path), "merge-tree", "--write-tree", "--name-only", "-z", left, right],
             capture_output=True,
             check=False,
-            text=True,
             timeout=60,
             env=detached_git_env(),
         )
@@ -457,12 +456,12 @@ def merge_tree_conflicts(path: Path, left: str, right: str) -> tuple[str, ...] |
         return ()
     if result.returncode != 1:
         return None
-    lines = result.stdout.splitlines()
+    records = result.stdout.split(b"\x00")
     conflicted: list[str] = []
-    for line in lines[1:]:
-        if not line.strip():
+    for record in records[1:]:
+        if not record:
             break
-        conflicted.append(line.strip())
+        conflicted.append(record.decode("utf-8", errors="surrogateescape"))
     return tuple(sorted(set(conflicted)))
 
 
@@ -513,12 +512,12 @@ def changes_against_shared_default(first, second, first_dirty, second_dirty, fir
         if first_default == second_default:
             first_base = run_git(first.path, "merge-base", first.head, first_default)
             second_base = run_git(second.path, "merge-base", second.head, second_default)
-            first_committed = set(run_git(first.path, "diff", "--name-only", "--no-renames", first_base, first.head).splitlines())
-            second_committed = set(run_git(second.path, "diff", "--name-only", "--no-renames", second_base, second.head).splitlines())
-            first_renames = run_git(first.path, "diff", "--name-only", "--find-renames",
-                                    "--diff-filter=R", first_base, first.head)
-            second_renames = run_git(second.path, "diff", "--name-only", "--find-renames",
-                                     "--diff-filter=R", second_base, second.head)
+            first_committed = set(nul_records(run_git(first.path, "diff", "--name-only", "-z", "--no-renames", first_base, first.head)))
+            second_committed = set(nul_records(run_git(second.path, "diff", "--name-only", "-z", "--no-renames", second_base, second.head)))
+            first_renames = nul_records(run_git(first.path, "diff", "--name-only", "-z", "--find-renames",
+                                                "--diff-filter=R", first_base, first.head))
+            second_renames = nul_records(run_git(second.path, "diff", "--name-only", "-z", "--find-renames",
+                                                 "--diff-filter=R", second_base, second.head))
             # Replace both sides only after every strict Git read succeeds.
             # Rename/directory-rename conflicts can be reported at a path
             # edited under another name. Preserve the conservative path
@@ -560,8 +559,8 @@ def contested_paths(
             # Use strict reads here: committed_against's best-effort empty
             # result must not turn an unreadable peer into permission to write.
             try:
-                first_committed = set(run_git(first.path, "diff", "--name-only", base, first.head).splitlines())
-                second_committed = set(run_git(second.path, "diff", "--name-only", base, second.head).splitlines())
+                first_committed = set(nul_records(run_git(first.path, "diff", "--name-only", "-z", base, first.head)))
+                second_committed = set(nul_records(run_git(second.path, "diff", "--name-only", "-z", base, second.head)))
                 first_changes = first_committed | first_dirty
                 second_changes = second_committed | second_dirty
             except AuditError:

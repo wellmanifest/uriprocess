@@ -256,13 +256,62 @@ def repository_ref(root: Path) -> str:
     return f"local:{common}"
 
 
+def _ticket_state_fields(text: str) -> tuple[set[str], set[str]]:
+    """Read explicit metadata, including the historical inline header.
+
+    A status projection never grants authority. Ignore fenced examples and
+    refuse contradictory declarations rather than select whichever comes first.
+    """
+    statuses: set[str] = set()
+    states: set[str] = set()
+    fence: str | None = None
+    fence_length = 0
+    for raw_line in text.split("\n"):
+        line = raw_line.removesuffix("\r")
+        delimiter = re.match(r"^[ \t]{0,3}(`{3,}|~{3,})(.*)$", line)
+        if fence is not None:
+            if (delimiter and delimiter.group(1)[0] == fence
+                    and len(delimiter.group(1)) >= fence_length
+                    and not delimiter.group(2).strip()):
+                fence = None
+            continue
+        if delimiter:
+            fence = delimiter.group(1)[0]
+            fence_length = len(delimiter.group(1))
+            continue
+        status = re.fullmatch(r"-[ \t]+\*\*Status\*\*:[ \t]*([A-Z_]+)[ \t]*", line, re.I)
+        workflow = re.fullmatch(r"-[ \t]+\*\*Workflow state\*\*:[ \t]*([A-Z_]+)[ \t]*", line, re.I)
+        legacy = re.fullmatch(
+            r"Status:[ \t]*([A-Z_]+)(?:[ \t]*/[ \t]*([A-Z_]+))?[ \t]*\.?[ \t]*",
+            line, re.I,
+        )
+        if status:
+            statuses.add(status.group(1).upper())
+        if workflow:
+            states.add(workflow.group(1).upper())
+        if legacy:
+            statuses.add(legacy.group(1).upper())
+            if legacy.group(2):
+                states.add(legacy.group(2).upper())
+    return statuses, states
+
+
+def parse_ticket_state_text(text: str) -> tuple[str | None, str | None]:
+    statuses, states = _ticket_state_fields(text)
+    if len(statuses) > 1 or len(states) > 1:
+        return None, None
+    return next(iter(statuses), None), next(iter(states), None)
+
+
 def projection_status(ticket_dir: Path) -> str | None:
     try:
         text = _read_text(ticket_dir / "README.md")
     except OSError:
         return None
-    match = re.search(r"(?mi)^-[ \t]+\*\*Status\*\*:[ \t]*([A-Z_]+)[ \t]*$", text)
-    return match.group(1).upper() if match else None
+    statuses, states = _ticket_state_fields(text)
+    if len(statuses) > 1 or len(states) > 1:
+        raise ActivityError("ticket status or workflow declarations conflict")
+    return next(iter(statuses), None)
 
 
 def _validate_terminal_receipt(receipt, seen):
@@ -342,6 +391,12 @@ def _stable_patch_id(payload: bytes, env: dict[str, str]) -> str | None:
     return fields[0] if len(fields) >= 2 and SHA_RE.fullmatch(fields[0]) else None
 
 
+# project/readme.sh regenerates this index from the ticket directories. A
+# squash or rebase onto a target where a sibling already added the same rows
+# drops its hunk, so patch identity covers every authored path but not it.
+GENERATED_INDEX_PATHSPEC = ("--", ":(top)", ":(top,exclude)project/TICKETS.md")
+
+
 def _patch_id(root: Path, commit: str) -> str | None:
     """Return Git's stable patch identity for one non-empty commit."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
@@ -356,6 +411,7 @@ def _patch_id(root: Path, commit: str) -> str | None:
             "--binary",
             "--full-index",
             commit,
+            *GENERATED_INDEX_PATHSPEC,
         ],
         capture_output=True,
         check=False,
@@ -381,6 +437,7 @@ def _range_patch_id(root: Path, base: str, head: str) -> str | None:
             "--full-index",
             base,
             head,
+            *GENERATED_INDEX_PATHSPEC,
         ],
         capture_output=True,
         check=False,

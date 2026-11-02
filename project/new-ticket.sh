@@ -6,6 +6,17 @@ set -euo pipefail
 TITLE="New Task Ticket"
 USERS=""
 AGENT="antigravity"
+WRITER_ACTOR=""
+WRITER_SESSION=""
+WRITER_IDENTITY_EXPLICIT=false
+SEED_BASELINE_REQUEST=""
+SEED_MODE=false
+
+if [[ "${NEW_PROJECT_WRITER_ACTOR+set}" == "set" || "${NEW_PROJECT_WRITER_SESSION+set}" == "set" ]]; then
+  WRITER_ACTOR="${NEW_PROJECT_WRITER_ACTOR:-}"
+  WRITER_SESSION="${NEW_PROJECT_WRITER_SESSION:-}"
+  WRITER_IDENTITY_EXPLICIT=true
+fi
 WORKSTREAM=""
 SCOPE_ARGUMENTS=()
 FORCE_NEW=false
@@ -20,9 +31,12 @@ SNAPSHOT_MATERIALIZE=""
 MIGRATION_AUTHORIZATION=""
 MIGRATION_AUTHORIZATION_SHA256=""
 RECOVER_REQUEST=""
+RECOVERY_HELPER=ticket_recovery
 RECOVERY_LEASE_STORE=""
 WORKTREE_SLUG=""
 BOOTSTRAP_ADOPTION_DIGEST=""
+STANDARD_ADOPTION_PLAN=""
+ADOPTION_PROJECTION=""
 CALLER_CHECKOUT="$(pwd -P)"
 ALLOCATOR_PACKAGE_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 
@@ -40,6 +54,10 @@ Usage: ./project/new-ticket.sh [options]
 
   -t, --title TITLE       Ticket title
   -a, --agent ID         Agent provider/id used for ai-{ID}.md
+      --writer-actor ID Explicit allocating actor (or NEW_PROJECT_WRITER_ACTOR)
+      --writer-session ID Explicit session (or NEW_PROJECT_WRITER_SESSION)
+      --seed-baseline-request FILE
+                          Exact external authority/state for one governance-only unborn seed
   -w, --workstream ID    Required workstream from the governance registry
       --path PATTERN     Repeatable owned implementation scope; persisted in intent
   -u, --users IDS        Compatibility input only; human files are not created
@@ -67,10 +85,14 @@ Usage: ./project/new-ticket.sh [options]
                           Independently pinned grant digest
       --recover-request FILE
                           Explicit exact-state pre-adoption recovery request
+      --restore-request FILE
+                          Exact request restoring an already reserved ticket checkout
       --recovery-lease-store DIR
-                          Existing external local controller store (recovery only)
+                          Existing external local controller store (recovery/restoration)
       --bootstrap-adoption-digest SHA
                           Confirm ownership of exact first scaffold adoption delta
+      --standard-adoption-plan FILE
+                          Recompute an exact published upgrade plan before local allocation
       --worktree-slug SLUG
                           Canonical linked-worktree slug; defaults to a stable title slug
 
@@ -110,6 +132,12 @@ while [[ $# -gt 0 ]]; do
       AGENT="$2"
       shift 2
       ;;
+    --writer-actor)
+      require_value "$@"; WRITER_ACTOR="$2"; WRITER_IDENTITY_EXPLICIT=true; shift 2 ;;
+    --writer-session)
+      require_value "$@"; WRITER_SESSION="$2"; WRITER_IDENTITY_EXPLICIT=true; shift 2 ;;
+    --seed-baseline-request)
+      require_value "$@"; SEED_BASELINE_REQUEST="$2"; shift 2 ;;
     -w|--workstream)
       require_value "$@"
       WORKSTREAM="$2"
@@ -145,12 +173,20 @@ while [[ $# -gt 0 ]]; do
       require_value "$@"; MIGRATION_AUTHORIZATION="$2"; shift 2 ;;
     --migration-authorization-sha256)
       require_value "$@"; MIGRATION_AUTHORIZATION_SHA256="$2"; shift 2 ;;
-    --recover-request)
-      require_value "$@"; RECOVER_REQUEST="$2"; shift 2 ;;
+    --recover-request|--restore-request)
+      require_value "$@"
+      if [[ -n "$RECOVER_REQUEST" ]]; then
+        echo "GOV-TICKET-ALLOCATION-003: pass exactly one recovery or restoration request." >&2
+        exit 5
+      fi
+      [[ "$1" == --restore-request ]] && RECOVERY_HELPER=ticket_restoration
+      RECOVER_REQUEST="$2"; shift 2 ;;
     --recovery-lease-store)
       require_value "$@"; RECOVERY_LEASE_STORE="$2"; shift 2 ;;
     --bootstrap-adoption-digest)
       require_value "$@"; BOOTSTRAP_ADOPTION_DIGEST="$2"; shift 2 ;;
+    --standard-adoption-plan)
+      require_value "$@"; STANDARD_ADOPTION_PLAN="$2"; shift 2 ;;
     --worktree-slug)
       require_value "$@"; WORKTREE_SLUG="$2"; shift 2 ;;
     --ticket-store-root)
@@ -206,6 +242,10 @@ if [[ ! "$AGENT" =~ ^[a-z0-9][a-z0-9._-]*$ ]]; then
   exit 2
 fi
 
+if [[ -n "$STANDARD_ADOPTION_PLAN" ]]; then
+  STANDARD_ADOPTION_PLAN="$(python3 -B -c 'import os,sys; print(os.path.abspath(sys.argv[1]))' "$STANDARD_ADOPTION_PLAN")"
+fi
+
 # Allocation may be requested from a linked checkout, but the clone's primary
 # checkout is the only valid authority for admission and canonical layout. Do
 # not infer it from $PWD: Git's registered-worktree order is the durable
@@ -223,6 +263,10 @@ fi
 
 TICKET_STORAGE="${TICKET_STORAGE:-$(git config --local --get new-project.ticketStorage 2>/dev/null || true)}"
 TICKET_STORAGE="${TICKET_STORAGE:-files}"
+if [[ -n "$STANDARD_ADOPTION_PLAN" && ( "$TICKET_STORAGE" != files || "$REFRESH_REMOTE" == true || "$FORCE_NEW" == true || -n "$BOOTSTRAP_ADOPTION_DIGEST" || -n "$SNAPSHOT_PROPOSAL" || -n "$SNAPSHOT_MATERIALIZE" || -n "$MIGRATION_AUTHORIZATION" || -n "$MIGRATION_AUTHORIZATION_SHA256" || -n "$RECOVER_REQUEST" || -n "$RECOVERY_LEASE_STORE" ) ]]; then
+  echo "GOV-TICKET-ALLOCATION-003: adoption plans require exclusive local file allocation without bootstrap or recovery overrides." >&2
+  exit 5
+fi
 if [[ "$TICKET_STORAGE" != files && "$TICKET_STORAGE" != sqlite ]]; then
   echo "GOV-TICKET-ALLOCATION-003: unknown ticket storage mode." >&2
   exit 1
@@ -325,6 +369,21 @@ if ! grep -Fxq -- "$WORKSTREAM" <<< "$WORKSTREAM_REGISTRY"; then
   exit 1
 fi
 
+# Validate caller identity before any reservation, refresh or scaffold effect.
+# Provider names and timestamps are not session identity.
+if [[ -z "$SNAPSHOT_PROPOSAL$SNAPSHOT_MATERIALIZE$RECOVER_REQUEST" ]]; then
+  if [[ "$WRITER_IDENTITY_EXPLICIT" == true ]]; then
+    if [[ ! "$WRITER_ACTOR" =~ ^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,159}$ ||
+          ! "$WRITER_SESSION" =~ ^[A-Za-z0-9][A-Za-z0-9._:@/-]{0,254}$ ]]; then
+      echo "GOV-CHANGE-LEASE-001: allocation requires explicit valid writer actor and session." >&2
+      exit 2
+    fi
+  else
+    WRITER_ACTOR="agent:${AGENT}"
+    WRITER_SESSION="allocation-$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  fi
+fi
+
 is_active_ticket() {
   local directory="$1" resolver status arguments=() runner=()
   if [[ "$TICKET_STORAGE" != sqlite ]]; then
@@ -394,14 +453,49 @@ require_classification_value kind "$KIND"
 require_classification_value priority "$PRIORITY"
 require_classification_value origin "$ORIGIN"
 
+# The incoming immutable package owns its verifier; the plan never names code.
+# Old adopters invoke this published source package's native allocator from
+# their primary checkout. A partial installed package is not a fallback.
+verify_standard_adoption() {
+  local runtime="$ALLOCATOR_PACKAGE_ROOT/scripts/create_adoption_lock.py"
+  if [[ ! -f "$runtime" || -L "$runtime" ]]; then
+    echo "GOV-TICKET-ALLOCATION-003: adoption allocation requires the complete immutable source package." >&2
+    return 5
+  fi
+  python3 -B - "$runtime" "$STANDARD_ADOPTION_PLAN" "$PWD" "$WORKSTREAM" "${SCOPE_ARGUMENTS[@]}" <<'PYADOPTION'
+import importlib.util, json, sys
+from pathlib import Path
+runtime, plan_path, root, workstream, *scope = sys.argv[1:]
+spec = importlib.util.spec_from_file_location("native_adoption_plan", runtime)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+plan = module.verify_allocation_plan(Path(plan_path), Path(root), workstream,
+    [argument.removeprefix("--path=") for argument in scope] or None)
+print(json.dumps({key: plan[key] for key in ("allowedPaths", "delivery", "digest")}))
+PYADOPTION
+}
+
 # Validate the explicit scope before any identity reservation or registered
 # allocation request. The same argv is used for admission and both stores.
-if (( ${#SCOPE_ARGUMENTS[@]} )); then
+if [[ -n "$STANDARD_ADOPTION_PLAN" ]]; then
+  if ! ADOPTION_PROJECTION="$(verify_standard_adoption)"; then
+    echo "GOV-TICKET-ALLOCATION-003: adoption allocation proof is invalid; preserve the target and recompute the exact published plan." >&2
+    exit 5
+  fi
+  mapfile -t adoption_paths < <(python3 -B -c 'import json,sys; print("\n".join(json.load(sys.stdin)["allowedPaths"]))' <<< "$ADOPTION_PROJECTION")
+  SCOPE_ARGUMENTS=()
+  for adoption_path in "${adoption_paths[@]}"; do SCOPE_ARGUMENTS+=("--path=$adoption_path"); done
+elif (( ${#SCOPE_ARGUMENTS[@]} )); then
   if [[ -z "$TICKET_STORAGE_HELPER" ]]; then
     echo "GOV-WORK-START-001: explicit scope requires the managed ticket storage bridge." >&2
     exit 3
   fi
-  python3 "$TICKET_STORAGE_HELPER" scope --root "$PWD" --workstream "$WORKSTREAM" "${SCOPE_ARGUMENTS[@]}" >/dev/null
+  scope_bootstrap_arguments=()
+  if [[ -n "$BOOTSTRAP_ADOPTION_DIGEST" ]]; then
+    scope_bootstrap_arguments+=(--bootstrap-adoption-digest "$BOOTSTRAP_ADOPTION_DIGEST")
+  fi
+  python3 "$TICKET_STORAGE_HELPER" scope --root "$PWD" --workstream "$WORKSTREAM" \
+    "${scope_bootstrap_arguments[@]}" "${SCOPE_ARGUMENTS[@]}" >/dev/null
 fi
 
 allocation_config() {
@@ -449,6 +543,24 @@ fi
 if [[ "$ALLOCATION_MODE" == "local-single-clone" && ( -n "$ALLOCATION_KEY" || -n "$ALLOCATION_RECEIPT" ) ]]; then
   echo "GOV-TICKET-ALLOCATION-003: registered allocation inputs are forbidden in local-single-clone mode." >&2
   echo "  remediation: remove the inputs or adopt a registered allocator policy." >&2
+  exit 5
+fi
+
+if [[ -n "$SEED_BASELINE_REQUEST" ]]; then
+  if [[ "$ALLOCATION_MODE" != local-single-clone || "$TICKET_STORAGE" != files \
+      || -z "$PRIMARY_CHECKOUT" || "$WRITER_IDENTITY_EXPLICIT" != true \
+      || -n "$RECOVER_REQUEST" || -n "$STANDARD_ADOPTION_PLAN" \
+      || "$REFRESH_REMOTE" == true || "$FORCE_NEW" == true ]]; then
+    echo "GOV-TICKET-ALLOCATION-003: seed requires explicit local file allocation and writer identity only." >&2
+    exit 5
+  fi
+  SEED_RUNNER="$PRIMARY_CHECKOUT/.governance/seed_baseline.py"
+  python3 -B "$SEED_RUNNER" preflight --root "$PRIMARY_CHECKOUT" \
+    --request "$SEED_BASELINE_REQUEST" --actor "$WRITER_ACTOR" --session "$WRITER_SESSION"
+  SEED_MODE=true
+fi
+if [[ -n "$STANDARD_ADOPTION_PLAN" && "$ALLOCATION_MODE" != local-single-clone ]]; then
+  echo "GOV-TICKET-ALLOCATION-003: adoption plans do not support registered allocation." >&2
   exit 5
 fi
 
@@ -502,8 +614,10 @@ if [[ -n "$RECOVER_REQUEST" || -n "$RECOVERY_LEASE_STORE" ]]; then
   # binds an already-existing canonical linked checkout. Resolve normal
   # allocation from primary, but execute this bounded recovery at the caller
   # checkout so its exact ticket branch and managed helper remain available.
+  # Restoration re-registers an already reserved identity whose checkout is
+  # lost; it shares these inputs and exclusions but never reserves a number.
   cd "$CALLER_CHECKOUT"
-  for candidate in .governance/ticket_recovery.py scripts/ticket_recovery.py; do
+  for candidate in ".governance/$RECOVERY_HELPER.py" "scripts/$RECOVERY_HELPER.py"; do
     if [[ -f "$candidate" ]]; then
       exec python3 "$candidate" --root . --request "$RECOVER_REQUEST" --lease-store "$RECOVERY_LEASE_STORE" --workstream "$WORKSTREAM"
     fi
@@ -559,6 +673,16 @@ fi
 # The clone allocation lock covers this observation and the identity effect;
 # it is NOT a writer lease. Recheck admission and fencing before development.
 # Unborn/non-Git bootstrap has no branch history yet and retains seed behavior.
+if [[ -n "$STANDARD_ADOPTION_PLAN" ]]; then
+  if ! rechecked_projection="$(verify_standard_adoption)"; then
+    echo "GOV-TICKET-ALLOCATION-003: adoption allocation proof changed under the clone lock." >&2
+    exit 5
+  fi
+  if [[ "$rechecked_projection" != "$ADOPTION_PROJECTION" ]]; then
+    echo "GOV-TICKET-ALLOCATION-003: adoption plan changed before reservation." >&2
+    exit 5
+  fi
+fi
 if git rev-parse --verify HEAD >/dev/null 2>&1; then
   start_runtime=""
   for candidate in .governance/work_start_check.py scripts/work_start_check.py; do
@@ -715,7 +839,7 @@ fi
 
 WORKTREE_PATH=""
 LEASE_PATH=""
-if [[ -n "$PRIMARY_CHECKOUT" ]]; then
+if [[ -n "$PRIMARY_CHECKOUT" && "$SEED_MODE" != true ]]; then
   # Filesystem-backed ticket content must never be materialized in the primary
   # checkout. Plan and verify the exact v5 path before reserving identity;
   # after reservation every later failure remains observable for recovery.
@@ -755,14 +879,25 @@ if [[ -n "$PRIMARY_CHECKOUT" ]]; then
     echo "GOV-TICKET-ALLOCATION-003: dirty primary requires an explicit disjoint --path scope admitted by work-start; preserve existing changes." >&2
     exit 5
   fi
-  if [[ "$(git -C "$PRIMARY_CHECKOUT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)" != "$TARGET_BRANCH" ]]; then
-    echo "GOV-TICKET-ALLOCATION-003: allocation requires the registered primary checkout on $TARGET_BRANCH." >&2
+  observe_primary_base() {
+    local branch head target remote
+    branch="$(git -C "$PRIMARY_CHECKOUT" symbolic-ref --quiet HEAD 2>/dev/null)" || return 1
+    head="$(git -C "$PRIMARY_CHECKOUT" rev-parse --verify 'HEAD^{commit}')" || return 1
+    target="$(git -C "$PRIMARY_CHECKOUT" rev-parse --verify "refs/heads/$TARGET_BRANCH^{commit}")" || return 1
+    remote="$(git -C "$PRIMARY_CHECKOUT" rev-parse --verify "refs/remotes/origin/$TARGET_BRANCH^{commit}" 2>/dev/null || true)"
+    [[ "$head" == "$target" ]] || return 1
+    if [[ "$branch" != "refs/heads/$TARGET_BRANCH" ]]; then
+      # A named alias is safe only with a complete, identical observed target.
+      # This does not refresh refs, switch primary or release active scope.
+      [[ "$branch" == refs/heads/* && "$remote" == "$head" ]] || return 1
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$branch" "$head" "$target" "$remote"
+  }
+  if ! primary_base_observation="$(observe_primary_base)"; then
+    echo "GOV-TICKET-ALLOCATION-003: primary must be on $TARGET_BRANCH or a named alias exactly matching local and origin target commits." >&2
     exit 5
   fi
-  if ! base_sha="$(git -C "$PRIMARY_CHECKOUT" rev-parse --verify "refs/heads/$TARGET_BRANCH^{commit}")"; then
-    echo "GOV-TICKET-ALLOCATION-003: observed target branch is unavailable." >&2
-    exit 5
-  fi
+  base_sha="$(cut -f2 <<< "$primary_base_observation")"
   # The layout contract needs a stable label, not a remote URL (which may
   # contain credentials in misconfigured clones).
   repository_ref="$(basename "$PRIMARY_CHECKOUT")"
@@ -798,6 +933,15 @@ for key in ("branch", "worktreePath", "leasePath"):
     exit 5
   fi
 
+  if [[ -n "$STANDARD_ADOPTION_PLAN" && "$(verify_standard_adoption)" != "$ADOPTION_PROJECTION" ]]; then
+    echo "GOV-TICKET-ALLOCATION-003: adoption plan changed at the identity boundary." >&2
+    exit 5
+  fi
+  if ! rechecked_primary_base="$(observe_primary_base)" \
+      || [[ "$rechecked_primary_base" != "$primary_base_observation" ]]; then
+    echo "GOV-TICKET-ALLOCATION-003: primary branch or target changed before ticket reservation." >&2
+    exit 5
+  fi
   reserve_ticket_number
   if ! git -C "$PRIMARY_CHECKOUT" worktree add --relative-paths -b "$WORKTREE_BRANCH" "$WORKTREE_PATH" "$base_sha"; then
     echo "GOV-TICKET-ALLOCATION-004: ticket number remains reserved; preserve and reconcile the failed worktree allocation." >&2
@@ -915,7 +1059,21 @@ EOF
 fi
 
 if (( ${#SCOPE_ARGUMENTS[@]} )); then
-  if [[ -n "$BOOTSTRAP_ADOPTION_DIGEST" ]]; then
+  if [[ -n "$STANDARD_ADOPTION_PLAN" ]]; then
+    # Full accepted delivery is written BEFORE native reservation hashes.
+    python3 -B - "$ticket_dir/intent.json" "$ticket_id" "$WORKSTREAM" "$ADOPTION_PROJECTION" <<'PYADOPTIONINTENT'
+import json, sys
+from pathlib import Path
+path, ticket, workstream, raw = sys.argv[1:]
+projection = json.loads(raw)
+intent = json.loads(Path(path).read_text())
+if intent["ticket"] != ticket or intent["workstream"] != workstream:
+    raise SystemExit("allocated adoption identity mismatch")
+intent["allowedPaths"] = [f"project/{ticket}/**", "TODO.md", "project/TICKETS.md", *projection["allowedPaths"]]
+intent["delivery"] = projection["delivery"]
+Path(path).write_text(json.dumps(intent, indent=2) + "\n")
+PYADOPTIONINTENT
+  elif [[ -n "$BOOTSTRAP_ADOPTION_DIGEST" ]]; then
     # The identical scope was validated against primary before reservation.
     # Only generated ticket metadata is written here, never adoption/source.
     python3 - "$ticket_dir/intent.json" "$ticket_id" "$WORKSTREAM" "${SCOPE_ARGUMENTS[@]}" <<'PYBOOT'
@@ -925,8 +1083,10 @@ path = Path(sys.argv[1])
 intent = json.loads(path.read_text())
 if intent["ticket"] != sys.argv[2] or intent["workstream"] != sys.argv[3]:
     raise SystemExit("allocated intent identity mismatch")
-intent["allowedPaths"] = [f'project/{sys.argv[2]}/**', 'TODO.md', 'project/TICKETS.md',
-                          *[arg.removeprefix("--path=") for arg in sys.argv[4:]]]
+intent["allowedPaths"] = list(dict.fromkeys([
+    f'project/{sys.argv[2]}/**', 'TODO.md', 'project/TICKETS.md',
+    *[arg.removeprefix("--path=") for arg in sys.argv[4:]]
+]))
 path.write_text(json.dumps(intent, indent=2) + "\n")
 PYBOOT
   else
@@ -935,13 +1095,69 @@ PYBOOT
   fi
 fi
 
+if [[ "$TICKET_STORAGE" != "sqlite" ]]; then
+  # Assess the actual declared scope before writer-reservation hashes are made.
+  # The external product is advisory; its absence is recorded in the README.
+  # Helpers older than the radar subcommand must degrade to the same advisory
+  # marker instead of failing the allocation (forward compatibility).
+  if [[ -n "$TICKET_STORAGE_HELPER" ]]; then
+    if ! python3 -B "$TICKET_STORAGE_HELPER" radar --root "$PWD" --ticket "$ticket_id" 2>/dev/null; then
+      echo "ticket-radar advisory: storage helper declined the assessment; README records it." >&2
+      cat >> "$ticket_dir/README.md" <<'RADAR'
+
+<!-- ticket-radar:start -->
+## Ticket Radar
+
+Assessment unavailable: managed ticket storage bridge declined the radar assessment.
+Advisory only; no execution or merge approval.
+<!-- ticket-radar:end -->
+RADAR
+    fi
+  else
+    cat >> "$ticket_dir/README.md" <<'RADAR'
+
+<!-- ticket-radar:start -->
+## Ticket Radar
+
+Assessment unavailable: managed ticket storage bridge is not installed.
+Advisory only; no execution or merge approval.
+<!-- ticket-radar:end -->
+RADAR
+  fi
+fi
+
+if [[ "$SEED_MODE" == true ]]; then
+  # Only the seed's own ticket carriers may precede a real baseline. Ordinary
+  # implementation still receives a canonical linked checkout and lease.
+  python3 -B "$SEED_RUNNER" prepare --root "$PRIMARY_CHECKOUT" \
+    --request "$SEED_BASELINE_REQUEST" --actor "$WRITER_ACTOR" \
+    --session "$WRITER_SESSION" --ticket "$ticket_id"
+  python3 -B "$SEED_RUNNER" commit --root "$PRIMARY_CHECKOUT" \
+    --request "$SEED_BASELINE_REQUEST" --actor "$WRITER_ACTOR" --session "$WRITER_SESSION"
+  base_sha="$(git rev-parse HEAD)"
+  if [[ -z "$WORKTREE_SLUG" ]]; then
+    WORKTREE_SLUG="$(printf '%s' "$TITLE" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//')"
+  fi
+  repository_ref="$(basename "$PRIMARY_CHECKOUT")"
+  layout="$(python3 .governance/worktree_path_check.py plan --repository "$repository_ref" \
+    --repository-name "$repository_ref" --ticket "$ticket_id" --slug "$WORKTREE_SLUG" \
+    --from-worktree "$PRIMARY_CHECKOUT" --path-style posix)"
+  python3 .governance/worktree_path_check.py validate - --check-filesystem <<< "$layout" >/dev/null
+  mapfile -t layout_values < <(python3 -c 'import json,sys; v=json.load(sys.stdin); print(v["branch"]); print(v["worktreePath"]); print(v["leasePath"])' <<< "$layout")
+  WORKTREE_BRANCH="${layout_values[0]}"
+  WORKTREE_PATH="${layout_values[1]}"
+  LEASE_PATH="${layout_values[2]}"
+  git worktree add --relative-paths -b "$WORKTREE_BRANCH" "$WORKTREE_PATH" "$base_sha"
+  cd "$WORKTREE_PATH"
+fi
+
 if [[ -n "$LEASE_PATH" ]]; then
   # A lease is local operational state, deliberately ignored by Git. Its
   # identity and scope bind the new branch/worktree before any implementation
   # begins; O_EXCL means a stale or competing lease is never overwritten.
   python3 - "$ticket_dir/intent.json" "$LEASE_PATH" "$ticket_id" "$WORKSTREAM" \
     "$WORKTREE_BRANCH" "$WORKTREE_SLUG" "$repository_ref" "$TARGET_BRANCH" \
-    "$base_sha" "$AGENT" "$timestamp" <<'PY'
+    "$base_sha" "$WRITER_ACTOR" "$WRITER_SESSION" "$timestamp" <<'PY'
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -950,7 +1166,7 @@ from pathlib import Path
 import sys
 
 (intent_path, lease_path, ticket, workstream, branch, slug, repository,
- target_branch, head, agent, issued_at) = sys.argv[1:]
+ target_branch, head, actor, session, issued_at) = sys.argv[1:]
 intent_file = Path(intent_path)
 lease_file = Path(lease_path)
 if intent_file.is_symlink() or lease_file.exists() or lease_file.is_symlink():
@@ -975,8 +1191,8 @@ lease = {
     "scopeHash": hashlib.sha256(canonical(allowed)).hexdigest(),
     "branchRef": "refs/heads/" + branch,
     "worktreeId": f"{ticket}--{slug}",
-    "ownerActor": "agent:" + agent,
-    "ownerSession": f"allocation-{ticket}-{issued_at}",
+    "ownerActor": actor,
+    "ownerSession": session,
     "phase": "claimed",
     "leaseRevision": 1,
     "fencingToken": 1,
@@ -1024,8 +1240,11 @@ if [[ -n "$USERS" ]]; then
   echo "warning: --users=$USERS did not create user-* files; human-owned input must come from a human or trusted intake boundary" >&2
 fi
 
-if [[ -f project/readme.sh ]]; then
-  bash ./project/readme.sh
+# The older adopter's index generator may require a different carrier format.
+# A plan allocates untracked metadata only; leave existing index bytes intact
+# until the separately authorized material upgrade installs its pinned tool.
+if [[ -z "$STANDARD_ADOPTION_PLAN" && -f project/readme.sh ]]; then
+  T2C_TICKET_INDEX_OWN="project/$ticket_id" bash ./project/readme.sh
 fi
 
 if [[ -n "$WORKTREE_PATH" ]]; then

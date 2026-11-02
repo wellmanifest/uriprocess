@@ -6,6 +6,7 @@ import argparse
 from contextlib import ExitStack
 from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -28,6 +29,14 @@ TRACKING = ("project/ticket-*/**", "project/TICKETS.md", "TODO.md")
 
 class ObservationError(ValueError):
     pass
+
+
+class UnknownWorkstream(ObservationError):
+    """The requested workstream is not declared; a caller input error, not divergent local work."""
+
+    def __init__(self, declared):
+        super().__init__("Workstream is not declared in the governance manifest")
+        self.declared = declared
 
 
 _OBSERVATION_LOG = ".subactor/receipts/work-start/observation-failures.log"
@@ -125,6 +134,13 @@ def read_json(path):
         return json.loads(path.read_text())
     except (OSError, ValueError) as error:
         raise ObservationError("Missing or invalid governance input") from error
+
+
+def quarantined(path, primary):
+    """Checkouts parked under the repository's .worktrees/.quarantine/ directory are preserved evidence, not claims."""
+    resolved = Path(path).resolve()
+    quarantine_root = (Path(primary) / ".worktrees" / ".quarantine").resolve()
+    return resolved != quarantine_root and resolved.is_relative_to(quarantine_root)
 
 
 def _historical_inactive_logs(root, ticket_dir, key, status, dirty_paths, target_sha):
@@ -413,7 +429,40 @@ def dirty_observation(root):
                 hashes[rel] = checksum.hexdigest()
         else:
             hashes[rel] = "absent-or-submodule"
-    return material(sorted(paths)), digest({"status": status, "files": hashes}), sorted(paths)
+    index = git(root, "ls-files", "--stage", "-z")
+    return material(sorted(paths)), digest({"status": status, "files": hashes, "index": index}), sorted(paths)
+
+
+def outstanding_detached_paths(root, paths, target):
+    """Subtract exact integrated bytes, without modifying or releasing the checkout."""
+    trees = {}
+    for item in git(root, "ls-tree", "-r", "--full-tree", "-z", target).split("\0"):
+        if item:
+            metadata, name = item.split("\t", 1)
+            mode, kind, oid = metadata.split()
+            if kind == "blob" and mode in {"100644", "100755"}:
+                trees[name] = (mode, oid)
+    indexes = {}
+    for item in git(root, "ls-files", "--stage", "-z").split("\0"):
+        if item:
+            metadata, name = item.split("\t", 1)
+            mode, oid, stage = metadata.split()
+            indexes.setdefault(name, []).append((mode, oid, stage))
+    outstanding = []
+    for name in paths:
+        path = root / name
+        accepted = trees.get(name)
+        if (not accepted or indexes.get(name) != [(*accepted, "0")]
+                or any(p.is_symlink() for p in (path, *path.parents)) or not path.is_file()):
+            outstanding.append(name)
+            continue
+        mode = "100755" if path.stat().st_mode & 0o100 else "100644"
+        # Raw hashing deliberately ignores clean/textconv filters and index
+        # flags: assume-unchanged cannot conceal different filesystem bytes.
+        oid = git(root, "hash-object", "--no-filters", "--", name).strip()
+        if (mode, oid) != accepted:
+            outstanding.append(name)
+    return outstanding
 
 
 def dirty_modified(root, paths):
@@ -537,13 +586,93 @@ def publication_observation(root, entries, target):
         return unknown()
 
 
+CONTROLLER_STORE_SCHEMA = "subactor.repository-change-lease-store/v1"
+FREE_LEASE_PHASES = {"closed", "cancelled", "released"}
+REPOSITORY_REF = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+RESOURCE_ACTIONS = {
+    "AVAILABLE": "Acquire the editing lease from the controller, then re-run work-start with --ticket before any write.",
+    "HELD_BY_TICKET": "Continue only under the existing lease after verifying its owner, fencing token and expiry.",
+    "HELD_BY_OTHER": "Wait for the holder's release or a protected handoff; do not prepare an expiring admission now.",
+    "HELD_EXPIRED": "The expired holder still blocks the resource until the controller releases it or records a "
+                    "protected takeover; expiry alone never authorizes takeover.",
+    "UNAVAILABLE": "Restore controller access; do not infer availability from disjoint paths or retry an admission.",
+}
+
+
+def _controller_bytes(store):
+    path = Path(os.path.abspath(store)) / "state.json"
+    if any(p.is_symlink() for p in (path, *path.parents)):
+        raise ObservationError("Symlinked controller state")
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as stream:
+        if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+            raise ObservationError("Controller state must be a regular file")
+        raw = stream.read(4 * 1024 * 1024 + 1)
+    if len(raw) > 4 * 1024 * 1024:
+        raise ObservationError("Controller state too large")
+    return raw
+
+
+def controller_observation(store, repository, target, ticket=None):
+    """Read-only availability of the controller's exclusive editing resource; never a grant or a queue entry."""
+    observation = {
+        "schema": "new-project.editing-resource-observation/v1",
+        "observedAt": datetime.now(timezone.utc).isoformat(),
+        "readOnly": True, "grantsAuthority": False, "queueSupported": False,
+        "repositoryRef": repository, "targetBranch": target, "ticket": ticket,
+        "resource": digest({"repositoryRef": repository, "targetBranch": target}),
+        "state": "UNAVAILABLE", "reason": None, "holder": None, "stateDigest": None,
+    }
+    try:
+        raw = _controller_bytes(store)
+    except FileNotFoundError:
+        observation["reason"] = "controller-store-missing"
+    except (OSError, ObservationError):
+        observation["reason"] = "controller-state-unreadable"
+    else:
+        try:
+            state = json.loads(raw)
+            if not isinstance(state, dict) or state.get("schema") != CONTROLLER_STORE_SCHEMA:
+                raise ValueError("unsupported store")
+            holder_id = state["active"].get(observation["resource"])
+            holder = None if holder_id is None else state["leases"][holder_id]
+            if holder is not None:
+                expires = datetime.fromisoformat(holder["expiresAt"].replace("Z", "+00:00"))
+                if expires.tzinfo is None or not isinstance(holder["phase"], str):
+                    raise ValueError("invalid holder")
+        except (ValueError, KeyError, TypeError, AttributeError):
+            observation["reason"] = "controller-state-invalid"
+        else:
+            if _controller_bytes(store) != raw:
+                observation["reason"] = "controller-state-changed"
+            elif holder is None or holder["phase"] in FREE_LEASE_PHASES:
+                observation["state"] = "AVAILABLE"
+            else:
+                # A safe reference only: no owner session, credential or plan.
+                observation["holder"] = {"leaseId": holder_id, "ticketId": holder.get("ticketId"),
+                                         "phase": holder["phase"], "expiresAt": holder["expiresAt"]}
+                if holder["phase"] == "expired" or expires <= datetime.now(timezone.utc):
+                    observation["state"] = "HELD_EXPIRED"
+                elif ticket is not None and holder.get("ticketId") == ticket:
+                    observation["state"] = "HELD_BY_TICKET"
+                else:
+                    observation["state"] = "HELD_BY_OTHER"
+            observation["stateDigest"] = hashlib.sha256(raw).hexdigest()
+    observation["nextAction"] = RESOURCE_ACTIONS[observation["state"]]
+    return observation
+
+
 def inspect(root, workstream, requested_paths=(), ticket=None, storage=None,
             observe_publication=False, expected_dirty_digest=None, recovery_intent=None,
-            bootstrap_adoption_digest=None):
+            bootstrap_adoption_digest=None, controller=None):
     root = Path(git(root, "rev-parse", "--show-toplevel").strip()).resolve()
     manifest = manifest_at(root)
     coordination = manifest["coordination"]
-    stream = coordination["workstreams"][workstream]
+    declared = coordination["workstreams"]
+    if workstream not in declared:
+        raise UnknownWorkstream(sorted(name for name in declared
+                                       if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name)))
+    stream = declared[workstream]
     limit = coordination["maxActiveTicketsPerWorkstream"]
     if type(limit) is not int or limit < 1:
         raise ObservationError("Invalid workstream WIP limit")
@@ -616,17 +745,28 @@ def inspect(root, workstream, requested_paths=(), ticket=None, storage=None,
                 intent = recovery_intent
                 status_override = "IN_PROGRESS"
             else:
-                intent = read_json(ticket_dir / "intent.json")
+                try:
+                    intent = read_json(ticket_dir / "intent.json")
+                except ObservationError:
+                    # A quarantined checkout may hold an interrupted merge. Record it
+                    # instead of aborting every allocation; its Git delta is still
+                    # compared below as pending work.
+                    if not quarantined(path, primary):
+                        raise
+                    intent = None
                 status_override = None
-            if intent.get("ticket") != ticket_id or intent.get("schema") not in (
-                    "new-project.intent/v2", "new-project.intent/v3"):
-                raise ObservationError("Branch/intent identity mismatch")
-            patterns(intent.get("allowedPaths"))
-            resolution = resolve_activity(path, ticket_dir, statuses, status_override=status_override)
-            active, status = resolution.active, resolution.projectionStatus
-            activity_authority = resolution.authority
-            if status is None:
-                raise ObservationError("Ticket status unknown")
+            if intent is None:
+                active, status, activity_authority = False, "QUARANTINED_UNREADABLE", "quarantine"
+            else:
+                if intent.get("ticket") != ticket_id or intent.get("schema") not in (
+                        "new-project.intent/v2", "new-project.intent/v3"):
+                    raise ObservationError("Branch/intent identity mismatch")
+                patterns(intent.get("allowedPaths"))
+                resolution = resolve_activity(path, ticket_dir, statuses, status_override=status_override)
+                active, status = resolution.active, resolution.projectionStatus
+                activity_authority = resolution.authority
+                if status is None:
+                    raise ObservationError("Ticket status unknown")
         canonical = bool(ticket_id and path.resolve().parent == primary / ".worktrees"
                          and path.name.startswith(ticket_id + "--"))
         entries.append({"path": str(path.resolve()), "branch": branch or None,
@@ -709,6 +849,9 @@ def inspect(root, workstream, requested_paths=(), ticket=None, storage=None,
         contribution = changes(root, comparison_sha, entry["headSha"])
         pending_paths = [p for p in entry["dirtyPaths"]
                          if not (Path(entry["path"]) == primary and p in bootstrap_owned)]
+        if (pending_paths and Path(entry["path"]) != primary and entry["branch"] is None
+                and entry["ticket"] is None and not entry["active"] and entry["ahead"] == 0):
+            pending_paths = outstanding_detached_paths(Path(entry["path"]), pending_paths, target_sha)
         contested = intersects(requested, pending_paths + contribution)
         reserved = entry["active"] and intersects(requested, entry["allowedPaths"])
         if contested or reserved:
@@ -782,6 +925,8 @@ def inspect(root, workstream, requested_paths=(), ticket=None, storage=None,
                              for key, row in records.items()})
     if observe_publication:
         payload["publication"] = publication_observation(root, entries, target)
+    if controller:
+        payload["editingResource"] = controller_observation(*controller, target, ticket)
     payload["observationDigest"] = digest({"refs": refs, "manifest": manifest, "report": payload,
                                           "ticketStorage": mode, "ticketInputDigest": storage_digest})
     if refs != git(root, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/remotes"):
@@ -797,6 +942,24 @@ def inspect(root, workstream, requested_paths=(), ticket=None, storage=None,
     return payload
 
 
+def refresh_autonomy_board(root):
+    """Best effort: every work start rewrites the ignored GOV-IDLE-TAKEOVER board; it never changes the route."""
+    checker = Path(__file__).resolve().parent / "idle_takeover.py"
+    if not checker.is_file():
+        return
+    try:
+        spec = importlib.util.spec_from_file_location("work_start_idle_takeover", checker)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        board = module.observe(Path(root))
+        path = module.write_board(board)
+    except Exception:  # noqa: BLE001 - the board is advisory; observation errors must not alter the route
+        return
+    eligible = [item["ticket"] for item in board["tickets"] if item["state"] == "IDLE_TAKEOVER_ELIGIBLE"]
+    print(f"autonomy board: {path}" + (f"; idle takeover candidates: {', '.join(eligible)}" if eligible else ""),
+          file=sys.stderr)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path.cwd())
@@ -809,6 +972,10 @@ def main(argv=None):
     parser.add_argument("--storage", choices=["files", "sqlite"])
     parser.add_argument("--observe-publication", action="store_true",
                         help="Read origin refs twice without fetching; distinguish remote code from integration/release authority.")
+    parser.add_argument("--controller-store", type=Path, metavar="DIR",
+                        help="Read-only availability of the controller editing resource (state.json); never a grant.")
+    parser.add_argument("--controller-repository", metavar="OWNER/NAME",
+                        help="Exact repository reference the controller resource is bound to (with --controller-store).")
     parser.add_argument("--expect-dirty-digest", metavar="SHA256",
                         help="With --ticket: dirtyDigest of the selected checkout from this session's previous observation; "
                              "a mismatch blocks reuse (clone-local CAS, not a lease).")
@@ -816,6 +983,9 @@ def main(argv=None):
     if args.expect_dirty_digest is not None and (
             not args.ticket or not re.fullmatch(r"[0-9a-f]{64}", args.expect_dirty_digest)):
         parser.error("--expect-dirty-digest requires --ticket and a lowercase SHA-256 digest")
+    if (args.controller_store is None) != (args.controller_repository is None) or (
+            args.controller_repository is not None and not REPOSITORY_REF.fullmatch(args.controller_repository)):
+        parser.error("--controller-store and --controller-repository OWNER/NAME must be passed together")
     if args.bootstrap_adoption_digest is not None and (
             not args.allocation_check or args.ticket or args.storage == "sqlite"
             or not re.fullmatch(r"[0-9a-f]{64}", args.bootstrap_adoption_digest)):
@@ -823,12 +993,24 @@ def main(argv=None):
     try:
         payload = inspect(args.root, args.workstream, args.path, args.ticket, args.storage,
                           args.observe_publication, args.expect_dirty_digest,
-                          bootstrap_adoption_digest=args.bootstrap_adoption_digest)
+                          bootstrap_adoption_digest=args.bootstrap_adoption_digest,
+                          controller=(args.controller_store, args.controller_repository)
+                          if args.controller_store else None)
     except (ObservationError, ActivityError, KeyError, TypeError, ValueError, OSError, StopIteration) as error:
         # Stdout stays generic — no exception content: remote URLs or
         # secret-bearing input never leak there. The real cause is written
         # to a local-only log instead of being discarded (see
         # _record_observation_failure).
+        if isinstance(error, UnknownWorkstream):
+            # The whole cause fits on stdout, so nothing is logged. Declared
+            # names come from the checked-in manifest and disclose nothing;
+            # the caller's raw argument is not echoed.
+            print(json.dumps({"schema": SCHEMA, "readOnly": True, "grantsAuthority": False,
+                              "createsWorktree": False, "route": "RECONCILE", "diagnostic": CODE,
+                              "reason": "GOV-WORKSTREAM-001: --workstream is not declared in the governance "
+                                        "manifest; no checkout needs reconciling. Declared workstreams: "
+                                        + (", ".join(error.declared) or "none") + "."}))
+            return 3
         logged = _record_observation_failure(args.root, error)
 
         print(json.dumps({"schema": SCHEMA, "readOnly": True, "grantsAuthority": False,
@@ -841,6 +1023,7 @@ def main(argv=None):
         return 3
     if args.allocation_check and payload["route"] != "NEW_TICKET_CANDIDATE":
         payload["diagnostic"] = CODE
+    refresh_autonomy_board(args.root)
     print(json.dumps(payload, sort_keys=True, ensure_ascii=True))
     return 3 if payload["diagnostic"] else 0
 
