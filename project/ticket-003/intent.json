@@ -1,0 +1,90 @@
+{
+  "schema": "new-project.intent/v3",
+  "ticket": "ticket-003",
+  "summary": "Harden polyglot snippet escaping, symlink ancestors, float overflow, surrogates, and bundle IO",
+  "workstream": "integration",
+  "classification": {
+    "kind": "BUG",
+    "priority": "P1",
+    "origin": "health"
+  },
+  "allowedPaths": [
+    "project/ticket-003/**",
+    "TODO.md",
+    "project/TICKETS.md",
+    "bundle.json",
+    "operations/bundle.py",
+    "operations/conformance.py",
+    "operations/uri_contract.py",
+    "operations/urp_io.py",
+    "tests/test_hardening.py"
+  ],
+  "forbiddenPaths": [
+    "project/ticket-*/user-*.md"
+  ],
+  "stacks": [],
+  "dependsOn": [],
+  "conflictsWith": [],
+  "integrationTicket": null,
+  "delivery": {
+    "acceptedBaseSha": "473dd874cb5654f34a41f9ed92cf482c4c15d782",
+    "targetBranch": "main",
+    "outcome": "Eliminate command/quote injection in polyglot URI snippet renderers, extract shared descriptor-safe I/O and strict JSON decoding into operations/urp_io.py (< 500 lines), reject symlinked ancestors, 1e309 float overflow, lone UTF-16 surrogates, and URI dot-segments/quotes/controls, cache compiled JSON Schema validators, and harden operations/bundle.py with atomic writes and regenerated bundle.json.",
+    "nonGoals": [
+      "Add network or execution authority to conformance.py",
+      "Modify normative package JSON Schema definitions"
+    ],
+    "complexity": "M",
+    "estimatedMinutes": 35,
+    "budgets": {
+      "maxImplementationFiles": 6,
+      "maxAffectedComponents": 2,
+      "maxPublicInterfaceChanges": 0,
+      "maxRuntimeDependencies": 0
+    },
+    "architecture": {
+      "status": "accepted",
+      "decision": "Extract descriptor-safe regular-file/symlink-ancestor I/O and strict finite/surrogate-free JSON decoding into operations/urp_io.py, cache compiled Draft202012Validator instances in operations/conformance.py, escape shell/JS/TS/Rust literals in operations/uri_contract.py, and verify all standard operations files in operations/bundle.py.",
+      "components": [
+        {
+          "name": "operations",
+          "paths": [
+            "operations/urp_io.py",
+            "operations/conformance.py",
+            "operations/uri_contract.py",
+            "operations/bundle.py",
+            "bundle.json"
+          ]
+        },
+        {
+          "name": "tests",
+          "paths": [
+            "tests/test_hardening.py"
+          ]
+        }
+      ],
+      "responsibilityChanges": false,
+      "interfaceChanges": [],
+      "dataChanges": [],
+      "ui": {
+        "impact": "none",
+        "states": [],
+        "evidence": []
+      },
+      "rollback": "Revert operations/*.py, bundle.json, and tests/test_hardening.py to acceptedBaseSha."
+    },
+    "runtimeDependencies": [],
+    "validation": [
+      {
+        "criterion": "AC-01",
+        "commands": [
+          "python3 -B operations/bundle.py --check",
+          "python3 -B -m unittest discover -s tests -v",
+          "./project/governance-check.sh --base origin/main",
+          "wellman check"
+        ],
+        "evidence": "project/ticket-003/README.md"
+      }
+    ]
+  }
+}
